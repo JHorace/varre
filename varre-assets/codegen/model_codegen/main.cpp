@@ -219,7 +219,26 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
     fail("OBJ file has no shapes: " + obj_path.generic_string());
   }
 
+  struct VertexKey {
+    int v = -1;
+    int vt = -1;
+    int vn = -1;
+
+    bool operator==(const VertexKey &other) const { return v == other.v && vt == other.vt && vn == other.vn; }
+  };
+
+  struct VertexKeyHash {
+    std::size_t operator()(const VertexKey &key) const {
+      // Small deterministic hash for OBJ index triplets.
+      std::size_t seed = static_cast<std::size_t>(key.v);
+      seed ^= static_cast<std::size_t>(key.vt) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+      seed ^= static_cast<std::size_t>(key.vn) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+      return seed;
+    }
+  };
+
   ParsedMesh mesh;
+  std::unordered_map<VertexKey, std::uint32_t, VertexKeyHash> vertex_map;
   for (std::size_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
     const tinyobj::shape_t &shape = shapes[shape_index];
     std::size_t offset = 0;
@@ -244,7 +263,19 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
           fail_obj_shape_face(obj_path, shape_index, face_index, "vertex index is negative");
         }
 
-        const std::size_t vp = static_cast<std::size_t>(idx.vertex_index) * 3U;
+        const VertexKey key{
+          .v = idx.vertex_index,
+          .vt = idx.texcoord_index,
+          .vn = idx.normal_index,
+        };
+
+        const auto found = vertex_map.find(key);
+        if (found != vertex_map.end()) {
+          face_indices.push_back(found->second);
+          continue;
+        }
+
+        const std::size_t vp = static_cast<std::size_t>(key.v) * 3U;
         if (vp + 2U >= attrib.vertices.size()) {
           fail_obj_shape_face(obj_path, shape_index, face_index, "vertex index is out of range");
         }
@@ -254,8 +285,8 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
         vertex.py = attrib.vertices[vp + 1U];
         vertex.pz = attrib.vertices[vp + 2U];
 
-        if (idx.texcoord_index >= 0) {
-          const std::size_t tp = static_cast<std::size_t>(idx.texcoord_index) * 2U;
+        if (key.vt >= 0) {
+          const std::size_t tp = static_cast<std::size_t>(key.vt) * 2U;
           if (tp + 1U >= attrib.texcoords.size()) {
             fail_obj_shape_face(obj_path, shape_index, face_index, "uv index is out of range");
           }
@@ -263,8 +294,8 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
           vertex.v = attrib.texcoords[tp + 1U];
         }
 
-        if (idx.normal_index >= 0) {
-          const std::size_t np = static_cast<std::size_t>(idx.normal_index) * 3U;
+        if (key.vn >= 0) {
+          const std::size_t np = static_cast<std::size_t>(key.vn) * 3U;
           if (np + 2U >= attrib.normals.size()) {
             fail_obj_shape_face(obj_path, shape_index, face_index, "normal index is out of range");
           }
@@ -274,7 +305,9 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
         }
 
         mesh.vertices.push_back(vertex);
-        face_indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size() - 1U));
+        const std::uint32_t new_index = static_cast<std::uint32_t>(mesh.vertices.size() - 1U);
+        vertex_map.emplace(key, new_index);
+        face_indices.push_back(new_index);
       }
 
       for (std::size_t i = 1; i + 1 < face_indices.size(); ++i) {
