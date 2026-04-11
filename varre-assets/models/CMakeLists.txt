@@ -56,3 +56,7 @@ target_include_directories(
 
 # Keep nested model-asset directory visible in CMake hierarchy.
 add_subdirectory(obj)
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
