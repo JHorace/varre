@@ -1,2 +1,50 @@
-# Placeholder for shader processing steps.
+set(VARRE_ASSETS_SHADERS_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(VARRE_ASSETS_SHADERS_GEN_HEADER "${VARRE_ASSETS_SHADERS_GEN_DIR}/shaders_generated.hpp")
+set(VARRE_ASSETS_SHADERS_GEN_SOURCE "${VARRE_ASSETS_SHADERS_GEN_DIR}/shaders_generated.cpp")
+set(VARRE_ASSETS_SHADERS_GENERATOR_DEPS
+  "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.hpp.in"
+  "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.cpp.in"
+)
 
+if(TARGET shader_codegen)
+  list(APPEND VARRE_ASSETS_SHADERS_GENERATOR_DEPS shader_codegen)
+endif()
+
+add_custom_command(
+  OUTPUT
+    "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
+    "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${VARRE_ASSETS_SHADERS_GEN_DIR}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.hpp.in"
+          "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.cpp.in"
+          "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+  DEPENDS ${VARRE_ASSETS_SHADERS_GENERATOR_DEPS}
+  COMMENT "Generating placeholder shader asset registry"
+  VERBATIM
+)
+
+add_custom_target(
+  varre_assets_shaders_codegen
+  DEPENDS
+    "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
+    "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+)
+
+add_library(
+  varre_assets_shaders STATIC
+  src/shaders_stub.cpp
+  "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+)
+
+add_dependencies(varre_assets_shaders varre_assets_shaders_codegen)
+
+target_compile_features(varre_assets_shaders PUBLIC cxx_std_23)
+target_include_directories(
+  varre_assets_shaders
+  PUBLIC
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${VARRE_ASSETS_SHADERS_GEN_DIR}"
+)

@@ -1,0 +1,8 @@
+#include "shaders_generated.hpp"
+
+namespace varre::assets::generated {
+
+static_assert(!kShadersGenerated, "Placeholder only. Replace with shader_codegen output.");
+
+}  // namespace varre::assets::generated
+

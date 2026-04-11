@@ -1,0 +1,8 @@
+#include "models_generated.hpp"
+
+namespace varre::assets::generated {
+
+static_assert(!kModelsGenerated, "Placeholder only. Replace with model_codegen output.");
+
+}  // namespace varre::assets::generated
+
