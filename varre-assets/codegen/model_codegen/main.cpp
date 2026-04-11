@@ -64,6 +64,15 @@ struct ModelBlob {
 };
 
 /**
+ * @brief Coordinate and UV conversion settings applied during import.
+ */
+struct MeshConventions {
+  bool flip_handedness = false;
+  bool flip_winding = false;
+  bool flip_uv_v = false;
+};
+
+/**
  * @brief Command-line options for the code generator.
  */
 struct CliOptions {
@@ -72,6 +81,7 @@ struct CliOptions {
   fs::path emit_hpp;
   fs::path emit_cpp;
   std::string ns = "varre::assets";
+  MeshConventions conventions;
 };
 
 /**
@@ -191,7 +201,7 @@ std::vector<fs::path> discover_obj_files(const fs::path &input_root) {
  * @param obj_path Path to OBJ file.
  * @return Parsed mesh data.
  */
-ParsedMesh parse_obj(const fs::path &obj_path) {
+ParsedMesh parse_obj(const fs::path &obj_path, const MeshConventions &conventions) {
   tinyobj::ObjReaderConfig config;
   config.triangulate = true;
   config.vertex_color = false;
@@ -286,6 +296,9 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
         vertex.px = attrib.vertices[vp + 0U];
         vertex.py = attrib.vertices[vp + 1U];
         vertex.pz = attrib.vertices[vp + 2U];
+        if (conventions.flip_handedness) {
+          vertex.pz = -vertex.pz;
+        }
 
         if (key.vt >= 0) {
           const std::size_t tp = static_cast<std::size_t>(key.vt) * 2U;
@@ -294,6 +307,9 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
           }
           vertex.u = attrib.texcoords[tp + 0U];
           vertex.v = attrib.texcoords[tp + 1U];
+          if (conventions.flip_uv_v) {
+            vertex.v = 1.0F - vertex.v;
+          }
         }
 
         if (key.vn >= 0) {
@@ -304,6 +320,9 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
           vertex.nx = attrib.normals[np + 0U];
           vertex.ny = attrib.normals[np + 1U];
           vertex.nz = attrib.normals[np + 2U];
+          if (conventions.flip_handedness) {
+            vertex.nz = -vertex.nz;
+          }
         }
 
         mesh.vertices.push_back(vertex);
@@ -314,9 +333,15 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
       }
 
       for (std::size_t i = 1; i + 1 < face_indices.size(); ++i) {
-        mesh.indices.push_back(face_indices[0]);
-        mesh.indices.push_back(face_indices[i]);
-        mesh.indices.push_back(face_indices[i + 1]);
+        if (conventions.flip_winding) {
+          mesh.indices.push_back(face_indices[0]);
+          mesh.indices.push_back(face_indices[i + 1]);
+          mesh.indices.push_back(face_indices[i]);
+        } else {
+          mesh.indices.push_back(face_indices[0]);
+          mesh.indices.push_back(face_indices[i]);
+          mesh.indices.push_back(face_indices[i + 1]);
+        }
       }
 
       offset += static_cast<std::size_t>(face_vertex_count);
@@ -369,12 +394,13 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
       const float nx = (e1y * e2z) - (e1z * e2y);
       const float ny = (e1z * e2x) - (e1x * e2z);
       const float nz = (e1x * e2y) - (e1y * e2x);
+      const float normal_sign = conventions.flip_winding ? -1.0F : 1.0F;
 
       const auto add_face_normal = [&](const std::uint32_t idx) {
         if (!vertex_has_explicit_normal[idx]) {
-          normal_sums[idx][0] += nx;
-          normal_sums[idx][1] += ny;
-          normal_sums[idx][2] += nz;
+          normal_sums[idx][0] += nx * normal_sign;
+          normal_sums[idx][1] += ny * normal_sign;
+          normal_sums[idx][2] += nz * normal_sign;
         }
       };
 
@@ -459,10 +485,34 @@ std::vector<std::uint8_t> encode_binary(const ParsedMesh &mesh) {
 }
 
 /**
+ * @brief Apply coordinate and UV conventions to a mesh in-place.
+ * @param mesh Mesh to modify.
+ * @param conventions Conversion settings.
+ */
+void apply_mesh_conventions(ParsedMesh *mesh, const MeshConventions &conventions) {
+  for (Vertex &vertex : mesh->vertices) {
+    if (conventions.flip_handedness) {
+      vertex.pz = -vertex.pz;
+      vertex.nz = -vertex.nz;
+    }
+    if (conventions.flip_uv_v) {
+      vertex.v = 1.0F - vertex.v;
+    }
+  }
+
+  if (conventions.flip_winding) {
+    for (std::size_t i = 0; i + 2 < mesh->indices.size(); i += 3) {
+      std::swap(mesh->indices[i + 1], mesh->indices[i + 2]);
+    }
+  }
+}
+
+/**
  * @brief Build a synthetic cube mesh for a guaranteed built-in asset.
+ * @param conventions Conversion settings.
  * @return Parsed mesh representing a cube.
  */
-ParsedMesh make_cube_mesh() {
+ParsedMesh make_cube_mesh(const MeshConventions &conventions) {
   ParsedMesh mesh;
 
   struct FaceDef {
@@ -505,6 +555,7 @@ ParsedMesh make_cube_mesh() {
     mesh.indices.push_back(base + 0U);
   }
 
+  apply_mesh_conventions(&mesh, conventions);
   return mesh;
 }
 
@@ -797,6 +848,12 @@ CliOptions parse_cli(int argc, char **argv) {
       opts.emit_cpp = read_value("--emit-cpp");
     } else if (arg == "--namespace") {
       opts.ns = read_value("--namespace");
+    } else if (arg == "--flip-handedness") {
+      opts.conventions.flip_handedness = true;
+    } else if (arg == "--flip-winding") {
+      opts.conventions.flip_winding = true;
+    } else if (arg == "--flip-uv-v") {
+      opts.conventions.flip_uv_v = true;
     } else {
       fail("unknown argument: " + std::string(arg));
     }
@@ -804,7 +861,7 @@ CliOptions parse_cli(int argc, char **argv) {
 
   if (opts.input_root.empty() || opts.output_dir.empty() || opts.emit_hpp.empty() || opts.emit_cpp.empty()) {
     fail("usage: model_codegen --input-root <dir> --output-dir <dir> --emit-hpp <file> --emit-cpp <file> "
-         "[--namespace <ns>]");
+         "[--namespace <ns>] [--flip-handedness] [--flip-winding] [--flip-uv-v]");
   }
 
   return opts;
@@ -832,7 +889,7 @@ int main(int argc, char **argv) {
     models.push_back(ModelBlob{
       .enum_name = "CUBE",
       .display_name = "cube",
-      .bytes = encode_binary(make_cube_mesh()),
+      .bytes = encode_binary(make_cube_mesh(opts.conventions)),
     });
 
     const std::vector<fs::path> obj_files = discover_obj_files(opts.input_root);
@@ -841,7 +898,7 @@ int main(int argc, char **argv) {
     for (const fs::path &obj_path : obj_files) {
       ParsedMesh mesh;
       try {
-        mesh = parse_obj(obj_path);
+        mesh = parse_obj(obj_path, opts.conventions);
       } catch (const std::exception &ex) {
         std::ostringstream oss;
         oss << "while processing " << obj_path.generic_string() << ": " << ex.what();

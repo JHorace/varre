@@ -3,12 +3,49 @@ set(VARRE_ASSETS_MODELS_GEN_HEADER "${VARRE_ASSETS_MODELS_GEN_DIR}/models_genera
 set(VARRE_ASSETS_MODELS_GEN_SOURCE "${VARRE_ASSETS_MODELS_GEN_DIR}/models_generated.cpp")
 set(VARRE_ASSETS_MODELS_INPUT_DIR "${CMAKE_CURRENT_LIST_DIR}/obj")
 
+option(
+  VARRE_ASSETS_MODELS_FLIP_HANDEDNESS
+  "Flip Z axis for imported models to change handedness."
+  OFF
+)
+option(
+  VARRE_ASSETS_MODELS_FLIP_WINDING
+  "Flip triangle winding order for imported models."
+  OFF
+)
+option(
+  VARRE_ASSETS_MODELS_FLIP_UV_V
+  "Flip V texture coordinate for imported models."
+  OFF
+)
+
 file(
   GLOB_RECURSE
   VARRE_ASSETS_MODELS_OBJ_FILES
   CONFIGURE_DEPENDS
   "${VARRE_ASSETS_MODELS_INPUT_DIR}/*.obj"
 )
+
+set(
+  VARRE_ASSETS_MODELS_GENERATOR_ARGS
+  --input-root "${VARRE_ASSETS_MODELS_INPUT_DIR}"
+  --output-dir "${VARRE_ASSETS_MODELS_GEN_DIR}"
+  --emit-hpp "${VARRE_ASSETS_MODELS_GEN_HEADER}"
+  --emit-cpp "${VARRE_ASSETS_MODELS_GEN_SOURCE}"
+  --namespace "varre::assets"
+)
+
+if(VARRE_ASSETS_MODELS_FLIP_HANDEDNESS)
+  list(APPEND VARRE_ASSETS_MODELS_GENERATOR_ARGS --flip-handedness)
+endif()
+
+if(VARRE_ASSETS_MODELS_FLIP_WINDING)
+  list(APPEND VARRE_ASSETS_MODELS_GENERATOR_ARGS --flip-winding)
+endif()
+
+if(VARRE_ASSETS_MODELS_FLIP_UV_V)
+  list(APPEND VARRE_ASSETS_MODELS_GENERATOR_ARGS --flip-uv-v)
+endif()
 
 set(VARRE_ASSETS_MODELS_GENERATOR_DEPS
   model_codegen
@@ -20,13 +57,7 @@ add_custom_command(
     "${VARRE_ASSETS_MODELS_GEN_HEADER}"
     "${VARRE_ASSETS_MODELS_GEN_SOURCE}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${VARRE_ASSETS_MODELS_GEN_DIR}"
-  COMMAND
-    $<TARGET_FILE:model_codegen>
-    --input-root "${VARRE_ASSETS_MODELS_INPUT_DIR}"
-    --output-dir "${VARRE_ASSETS_MODELS_GEN_DIR}"
-    --emit-hpp "${VARRE_ASSETS_MODELS_GEN_HEADER}"
-    --emit-cpp "${VARRE_ASSETS_MODELS_GEN_SOURCE}"
-    --namespace "varre::assets"
+  COMMAND $<TARGET_FILE:model_codegen> ${VARRE_ASSETS_MODELS_GENERATOR_ARGS}
   DEPENDS ${VARRE_ASSETS_MODELS_GENERATOR_DEPS}
   COMMENT "Generating model asset registry"
   VERBATIM
