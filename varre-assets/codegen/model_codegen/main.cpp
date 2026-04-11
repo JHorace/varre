@@ -14,7 +14,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,6 +21,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <tiny_obj_loader.h>
 
 namespace fs = std::filesystem;
 
@@ -79,150 +80,16 @@ struct CliOptions {
 [[noreturn]] void fail(const std::string &message) { throw std::runtime_error(message); }
 
 /**
- * @brief Throw a parse error with file and line context.
- * @param file Source file path being parsed.
- * @param line_number 1-based line number.
- * @param message Detailed parse failure message.
+ * @brief Throw an OBJ-related fatal error with shape/face context.
+ * @param file Source OBJ file.
+ * @param shape_index Shape index from tinyobj.
+ * @param face_index Face index inside shape.
+ * @param message Detailed error message.
  */
-[[noreturn]] void fail_parse(const fs::path &file, std::size_t line_number, const std::string &message) {
+[[noreturn]] void fail_obj_shape_face(const fs::path &file, std::size_t shape_index, std::size_t face_index, const std::string &message) {
   std::ostringstream oss;
-  oss << file.generic_string() << ":" << line_number << ": " << message;
+  oss << file.generic_string() << ": shape " << shape_index << ", face " << face_index << ": " << message;
   fail(oss.str());
-}
-
-/**
- * @brief Trim leading and trailing ASCII whitespace.
- * @param in Input string view.
- * @return Trimmed copy.
- */
-std::string trim(const std::string_view in) {
-  std::size_t first = 0;
-  while (first < in.size() && std::isspace(static_cast<unsigned char>(in[first])) != 0) {
-    ++first;
-  }
-
-  std::size_t last = in.size();
-  while (last > first && std::isspace(static_cast<unsigned char>(in[last - 1])) != 0) {
-    --last;
-  }
-
-  return std::string(in.substr(first, last - first));
-}
-
-/**
- * @brief Parse an integer token with contextual diagnostics.
- * @param token Source token text.
- * @param file Source file path.
- * @param line_number 1-based line number.
- * @param field_name Semantic field label for diagnostics.
- * @return Parsed integer value.
- */
-int parse_int(const std::string &token, const fs::path &file, std::size_t line_number, const char *field_name) {
-  try {
-    std::size_t consumed = 0;
-    const int value = std::stoi(token, &consumed, 10);
-    if (consumed != token.size()) {
-      fail_parse(file, line_number, std::string("invalid integer in ") + field_name + ": \"" + token + "\"");
-    }
-    return value;
-  } catch (const std::exception &) {
-    fail_parse(file, line_number, std::string("invalid integer in ") + field_name + ": \"" + token + "\"");
-  }
-}
-
-/**
- * @brief Parse a float token with contextual diagnostics.
- * @param token Source token text.
- * @param file Source file path.
- * @param line_number 1-based line number.
- * @param field_name Semantic field label for diagnostics.
- * @return Parsed float value.
- */
-float parse_float(const std::string &token, const fs::path &file, std::size_t line_number, const char *field_name) {
-  try {
-    std::size_t consumed = 0;
-    const float value = std::stof(token, &consumed);
-    if (consumed != token.size()) {
-      fail_parse(file, line_number, std::string("invalid float in ") + field_name + ": \"" + token + "\"");
-    }
-    return value;
-  } catch (const std::exception &) {
-    fail_parse(file, line_number, std::string("invalid float in ") + field_name + ": \"" + token + "\"");
-  }
-}
-
-/**
- * @brief Parsed OBJ face index triplet (`v/vt/vn`).
- */
-struct ObjIndex {
-  int v = 0;
-  int vt = 0;
-  int vn = 0;
-};
-
-/**
- * @brief Parse a single OBJ face element token.
- * @param token Token in OBJ `f` syntax (`v`, `v/vt`, or `v/vt/vn`).
- * @param file Source file path.
- * @param line_number 1-based source line.
- * @return Parsed indices with `0` for omitted `vt`/`vn`.
- */
-ObjIndex parse_obj_index(const std::string &token, const fs::path &file, std::size_t line_number) {
-  ObjIndex idx{};
-
-  const std::size_t first_slash = token.find('/');
-  if (first_slash == std::string::npos) {
-    idx.v = parse_int(token, file, line_number, "face vertex index");
-    return idx;
-  }
-
-  const std::string v_token = token.substr(0, first_slash);
-  if (v_token.empty()) {
-    fail_parse(file, line_number, "face token is missing position index: \"" + token + "\"");
-  }
-  idx.v = parse_int(v_token, file, line_number, "face vertex index");
-
-  const std::size_t second_slash = token.find('/', first_slash + 1);
-  if (second_slash == std::string::npos) {
-    const std::string vt_token = token.substr(first_slash + 1);
-    if (!vt_token.empty()) {
-      idx.vt = parse_int(vt_token, file, line_number, "face uv index");
-    }
-    return idx;
-  }
-
-  const std::string vt_token = token.substr(first_slash + 1, second_slash - first_slash - 1);
-  const std::string vn_token = token.substr(second_slash + 1);
-  if (!vt_token.empty()) {
-    idx.vt = parse_int(vt_token, file, line_number, "face uv index");
-  }
-  if (!vn_token.empty()) {
-    idx.vn = parse_int(vn_token, file, line_number, "face normal index");
-  }
-  return idx;
-}
-
-/**
- * @brief Resolve OBJ 1-based or negative index into a zero-based index.
- * @param idx OBJ index value.
- * @param count Number of available elements in the referenced array.
- * @param file Source file path.
- * @param line_number 1-based source line.
- * @param field_name Semantic field label for diagnostics.
- * @return Resolved zero-based index.
- */
-int resolve_obj_index(int idx, std::size_t count, const fs::path &file, std::size_t line_number, const char *field_name) {
-  if (idx == 0) {
-    fail_parse(file, line_number, std::string(field_name) + " cannot be 0");
-  }
-
-  const long long resolved = idx > 0 ? static_cast<long long>(idx - 1) : static_cast<long long>(count) + idx;
-  if (resolved < 0 || resolved >= static_cast<long long>(count)) {
-    std::ostringstream oss;
-    oss << field_name << " out of range: " << idx << " (count=" << count << ")";
-    fail_parse(file, line_number, oss.str());
-  }
-  return static_cast<int>(resolved);
 }
 
 /**
@@ -324,109 +191,90 @@ std::vector<fs::path> discover_obj_files(const fs::path &input_root) {
  * @return Parsed mesh data.
  */
 ParsedMesh parse_obj(const fs::path &obj_path) {
-  std::ifstream input(obj_path);
-  if (!input.is_open()) {
-    fail("could not open OBJ file: " + obj_path.generic_string());
+  tinyobj::ObjReaderConfig config;
+  config.triangulate = true;
+  config.vertex_color = false;
+  if (obj_path.has_parent_path()) {
+    config.mtl_search_path = obj_path.parent_path().string();
   }
 
-  std::vector<std::array<float, 3>> positions;
-  std::vector<std::array<float, 2>> uvs;
-  std::vector<std::array<float, 3>> normals;
+  tinyobj::ObjReader reader;
+  if (!reader.ParseFromFile(obj_path.string(), config)) {
+    std::ostringstream oss;
+    oss << "tinyobj failed to parse OBJ: " << obj_path.generic_string();
+    if (!reader.Error().empty()) {
+      oss << " (" << reader.Error() << ")";
+    }
+    fail(oss.str());
+  }
+
+  if (!reader.Warning().empty()) {
+    std::cerr << "model_codegen: warning: " << obj_path.generic_string() << ": " << reader.Warning() << '\n';
+  }
+
+  const tinyobj::attrib_t &attrib = reader.GetAttrib();
+  const std::vector<tinyobj::shape_t> &shapes = reader.GetShapes();
+
+  if (shapes.empty()) {
+    fail("OBJ file has no shapes: " + obj_path.generic_string());
+  }
+
   ParsedMesh mesh;
+  for (std::size_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
+    const tinyobj::shape_t &shape = shapes[shape_index];
+    std::size_t offset = 0;
 
-  std::string line;
-  std::size_t line_number = 0;
-  while (std::getline(input, line)) {
-    ++line_number;
-    const std::string trimmed = trim(line);
-    if (trimmed.empty() || trimmed.front() == '#') {
-      continue;
-    }
-
-    std::istringstream iss(trimmed);
-    std::string op;
-    iss >> op;
-
-    if (op == "v") {
-      std::string sx;
-      std::string sy;
-      std::string sz;
-      if (!(iss >> sx >> sy >> sz)) {
-        fail_parse(obj_path, line_number, "vertex position requires 3 floats");
-      }
-      positions.push_back({
-        parse_float(sx, obj_path, line_number, "vertex x"),
-        parse_float(sy, obj_path, line_number, "vertex y"),
-        parse_float(sz, obj_path, line_number, "vertex z"),
-      });
-      continue;
-    }
-
-    if (op == "vt") {
-      std::string su;
-      std::string sv;
-      if (!(iss >> su >> sv)) {
-        fail_parse(obj_path, line_number, "vertex UV requires at least 2 floats");
-      }
-      uvs.push_back({
-        parse_float(su, obj_path, line_number, "uv u"),
-        parse_float(sv, obj_path, line_number, "uv v"),
-      });
-      continue;
-    }
-
-    if (op == "vn") {
-      std::string sx;
-      std::string sy;
-      std::string sz;
-      if (!(iss >> sx >> sy >> sz)) {
-        fail_parse(obj_path, line_number, "vertex normal requires 3 floats");
-      }
-      normals.push_back({
-        parse_float(sx, obj_path, line_number, "normal x"),
-        parse_float(sy, obj_path, line_number, "normal y"),
-        parse_float(sz, obj_path, line_number, "normal z"),
-      });
-      continue;
-    }
-
-    if (op == "f") {
-      std::vector<std::string> tokens;
-      for (std::string token; iss >> token;) {
-        tokens.push_back(token);
-      }
-
-      if (tokens.size() < 3) {
-        fail_parse(obj_path, line_number, "face requires at least 3 vertices");
+    for (std::size_t face_index = 0; face_index < shape.mesh.num_face_vertices.size(); ++face_index) {
+      const int face_vertex_count = shape.mesh.num_face_vertices[face_index];
+      if (face_vertex_count < 3) {
+        fail_obj_shape_face(obj_path, shape_index, face_index, "face has fewer than 3 vertices");
       }
 
       std::vector<std::uint32_t> face_indices;
-      face_indices.reserve(tokens.size());
+      face_indices.reserve(static_cast<std::size_t>(face_vertex_count));
 
-      for (const std::string &token : tokens) {
-        const ObjIndex obj_index = parse_obj_index(token, obj_path, line_number);
-
-        const int pos_idx = resolve_obj_index(obj_index.v, positions.size(), obj_path, line_number, "position index");
-        Vertex vertex{};
-        vertex.px = positions[static_cast<std::size_t>(pos_idx)][0];
-        vertex.py = positions[static_cast<std::size_t>(pos_idx)][1];
-        vertex.pz = positions[static_cast<std::size_t>(pos_idx)][2];
-
-        if (obj_index.vt != 0) {
-          const int uv_idx = resolve_obj_index(obj_index.vt, uvs.size(), obj_path, line_number, "uv index");
-          vertex.u = uvs[static_cast<std::size_t>(uv_idx)][0];
-          vertex.v = uvs[static_cast<std::size_t>(uv_idx)][1];
+      for (int i = 0; i < face_vertex_count; ++i) {
+        const std::size_t idx_offset = offset + static_cast<std::size_t>(i);
+        if (idx_offset >= shape.mesh.indices.size()) {
+          fail_obj_shape_face(obj_path, shape_index, face_index, "index buffer is shorter than expected");
         }
 
-        if (obj_index.vn != 0) {
-          const int normal_idx = resolve_obj_index(obj_index.vn, normals.size(), obj_path, line_number, "normal index");
-          vertex.nx = normals[static_cast<std::size_t>(normal_idx)][0];
-          vertex.ny = normals[static_cast<std::size_t>(normal_idx)][1];
-          vertex.nz = normals[static_cast<std::size_t>(normal_idx)][2];
+        const tinyobj::index_t &idx = shape.mesh.indices[idx_offset];
+        if (idx.vertex_index < 0) {
+          fail_obj_shape_face(obj_path, shape_index, face_index, "vertex index is negative");
+        }
+
+        const std::size_t vp = static_cast<std::size_t>(idx.vertex_index) * 3U;
+        if (vp + 2U >= attrib.vertices.size()) {
+          fail_obj_shape_face(obj_path, shape_index, face_index, "vertex index is out of range");
+        }
+
+        Vertex vertex{};
+        vertex.px = attrib.vertices[vp + 0U];
+        vertex.py = attrib.vertices[vp + 1U];
+        vertex.pz = attrib.vertices[vp + 2U];
+
+        if (idx.texcoord_index >= 0) {
+          const std::size_t tp = static_cast<std::size_t>(idx.texcoord_index) * 2U;
+          if (tp + 1U >= attrib.texcoords.size()) {
+            fail_obj_shape_face(obj_path, shape_index, face_index, "uv index is out of range");
+          }
+          vertex.u = attrib.texcoords[tp + 0U];
+          vertex.v = attrib.texcoords[tp + 1U];
+        }
+
+        if (idx.normal_index >= 0) {
+          const std::size_t np = static_cast<std::size_t>(idx.normal_index) * 3U;
+          if (np + 2U >= attrib.normals.size()) {
+            fail_obj_shape_face(obj_path, shape_index, face_index, "normal index is out of range");
+          }
+          vertex.nx = attrib.normals[np + 0U];
+          vertex.ny = attrib.normals[np + 1U];
+          vertex.nz = attrib.normals[np + 2U];
         }
 
         mesh.vertices.push_back(vertex);
-        face_indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size() - 1));
+        face_indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size() - 1U));
       }
 
       for (std::size_t i = 1; i + 1 < face_indices.size(); ++i) {
@@ -434,7 +282,14 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
         mesh.indices.push_back(face_indices[i]);
         mesh.indices.push_back(face_indices[i + 1]);
       }
-      continue;
+
+      offset += static_cast<std::size_t>(face_vertex_count);
+    }
+
+    if (offset != shape.mesh.indices.size()) {
+      std::ostringstream oss;
+      oss << "shape index count mismatch (consumed=" << offset << ", total=" << shape.mesh.indices.size() << ")";
+      fail_obj_shape_face(obj_path, shape_index, 0, oss.str());
     }
   }
 
