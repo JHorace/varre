@@ -1,8 +1,0 @@
-#pragma once
-
-namespace varre::assets::generated {
-
-inline constexpr bool kModelsGenerated = false;
-
-}  // namespace varre::assets::generated
-
