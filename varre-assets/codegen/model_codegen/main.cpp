@@ -9,6 +9,7 @@
 #include <array>
 #include <bit>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -239,6 +240,7 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
 
   ParsedMesh mesh;
   std::unordered_map<VertexKey, std::uint32_t, VertexKeyHash> vertex_map;
+  std::vector<bool> vertex_has_explicit_normal;
   for (std::size_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
     const tinyobj::shape_t &shape = shapes[shape_index];
     std::size_t offset = 0;
@@ -307,6 +309,7 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
         mesh.vertices.push_back(vertex);
         const std::uint32_t new_index = static_cast<std::uint32_t>(mesh.vertices.size() - 1U);
         vertex_map.emplace(key, new_index);
+        vertex_has_explicit_normal.push_back(key.vn >= 0);
         face_indices.push_back(new_index);
       }
 
@@ -328,6 +331,78 @@ ParsedMesh parse_obj(const fs::path &obj_path) {
 
   if (mesh.vertices.empty() || mesh.indices.empty()) {
     fail("OBJ file has no usable geometry: " + obj_path.generic_string());
+  }
+
+  // Generate vertex normals only where OBJ data did not provide them.
+  bool has_missing_normals = false;
+  for (const bool has_normal : vertex_has_explicit_normal) {
+    if (!has_normal) {
+      has_missing_normals = true;
+      break;
+    }
+  }
+
+  if (has_missing_normals) {
+    std::vector<std::array<float, 3>> normal_sums(mesh.vertices.size(), {0.0F, 0.0F, 0.0F});
+
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+      const std::uint32_t i0 = mesh.indices[i + 0];
+      const std::uint32_t i1 = mesh.indices[i + 1];
+      const std::uint32_t i2 = mesh.indices[i + 2];
+
+      if (static_cast<std::size_t>(i0) >= mesh.vertices.size() || static_cast<std::size_t>(i1) >= mesh.vertices.size() ||
+          static_cast<std::size_t>(i2) >= mesh.vertices.size()) {
+        fail("generated index out of range while computing normals for: " + obj_path.generic_string());
+      }
+
+      const Vertex &v0 = mesh.vertices[i0];
+      const Vertex &v1 = mesh.vertices[i1];
+      const Vertex &v2 = mesh.vertices[i2];
+
+      const float e1x = v1.px - v0.px;
+      const float e1y = v1.py - v0.py;
+      const float e1z = v1.pz - v0.pz;
+      const float e2x = v2.px - v0.px;
+      const float e2y = v2.py - v0.py;
+      const float e2z = v2.pz - v0.pz;
+
+      const float nx = (e1y * e2z) - (e1z * e2y);
+      const float ny = (e1z * e2x) - (e1x * e2z);
+      const float nz = (e1x * e2y) - (e1y * e2x);
+
+      const auto add_face_normal = [&](const std::uint32_t idx) {
+        if (!vertex_has_explicit_normal[idx]) {
+          normal_sums[idx][0] += nx;
+          normal_sums[idx][1] += ny;
+          normal_sums[idx][2] += nz;
+        }
+      };
+
+      add_face_normal(i0);
+      add_face_normal(i1);
+      add_face_normal(i2);
+    }
+
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+      if (vertex_has_explicit_normal[i]) {
+        continue;
+      }
+
+      const float nx = normal_sums[i][0];
+      const float ny = normal_sums[i][1];
+      const float nz = normal_sums[i][2];
+      const float len = std::sqrt((nx * nx) + (ny * ny) + (nz * nz));
+
+      if (len > 1e-8F) {
+        mesh.vertices[i].nx = nx / len;
+        mesh.vertices[i].ny = ny / len;
+        mesh.vertices[i].nz = nz / len;
+      } else {
+        mesh.vertices[i].nx = 0.0F;
+        mesh.vertices[i].ny = 1.0F;
+        mesh.vertices[i].nz = 0.0F;
+      }
+    }
   }
 
   return mesh;
