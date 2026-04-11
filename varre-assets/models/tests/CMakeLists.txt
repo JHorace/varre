@@ -13,6 +13,13 @@ endif()
 
 add_executable(varre_assets_models_tests model_loader.tests.cpp)
 target_compile_features(varre_assets_models_tests PRIVATE cxx_std_23)
+target_compile_definitions(
+  varre_assets_models_tests
+  PRIVATE
+    VARRE_MODEL_CODEGEN_EXE=\"$<TARGET_FILE:model_codegen>\"
+    VARRE_MODELS_CORPUS_VALID_DIR=\"${CMAKE_CURRENT_LIST_DIR}/corpus/valid\"
+    VARRE_MODELS_CORPUS_INVALID_DIR=\"${CMAKE_CURRENT_LIST_DIR}/corpus/invalid\"
+)
 target_link_libraries(
   varre_assets_models_tests
   PRIVATE
@@ -21,4 +28,3 @@ target_link_libraries(
 )
 
 add_test(NAME varre_assets_models_tests COMMAND varre_assets_models_tests)
-

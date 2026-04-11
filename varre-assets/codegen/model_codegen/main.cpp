@@ -760,6 +760,14 @@ std::string emit_header(const std::string &ns, const std::vector<ModelBlob> &mod
   hpp << " */\n";
   hpp << "[[nodiscard]] const std::byte* get_model_data(ModelId id, std::size_t* out_size);\n";
   hpp << "/**\n";
+  hpp << " * @brief Decode an arbitrary model blob using the generated format parser.\n";
+  hpp << " * @param id Model identifier used for diagnostics.\n";
+  hpp << " * @param data Pointer to encoded model bytes.\n";
+  hpp << " * @param size Size of encoded model data in bytes.\n";
+  hpp << " * @return Decoded model object.\n";
+  hpp << " */\n";
+  hpp << "[[nodiscard]] ModelAsset decode_model_data(ModelId id, const std::byte* data, std::size_t size);\n";
+  hpp << "/**\n";
   hpp << " * @brief Decode a model blob into runtime vectors.\n";
   hpp << " * @param id Model identifier.\n";
   hpp << " * @return Decoded model object.\n";
@@ -919,13 +927,17 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "  return reinterpret_cast<const std::byte*>(record->data);\n";
   cpp << "}\n\n";
 
-  cpp << "ModelAsset load_model(ModelId id) {\n";
+  cpp << "ModelAsset decode_model_data(ModelId id, const std::byte* blob_data, std::size_t blob_size) {\n";
   cpp << "  const ModelRecord* record = find_record(id);\n";
+  cpp << "  const ModelRecord unknown_record{id, \"<unknown>\", \"<external>\", \"<external>\", 0U, nullptr, 0U};\n";
   cpp << "  if (record == nullptr) {\n";
-  cpp << "    throw std::runtime_error(std::string(\"unknown ModelId: \") + std::to_string(static_cast<std::uint32_t>(id)));\n";
+  cpp << "    record = &unknown_record;\n";
+  cpp << "  }\n";
+  cpp << "  if (blob_data == nullptr) {\n";
+  cpp << "    fail_decode(record, \"blob_data is null\");\n";
   cpp << "  }\n\n";
-  cpp << "  const std::uint8_t* data = record->data;\n";
-  cpp << "  const std::size_t size = record->size;\n";
+  cpp << "  const std::uint8_t* data = reinterpret_cast<const std::uint8_t*>(blob_data);\n";
+  cpp << "  const std::size_t size = blob_size;\n";
   cpp << "  std::size_t offset = 0;\n\n";
   cpp << "  const std::uint32_t magic = read_u32(data, size, &offset, record, \"magic\");\n";
   cpp << "  if (magic != kModelBinaryMagic) {\n";
@@ -992,6 +1004,12 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "    fail_decode(record, \"trailing bytes in asset blob\");\n";
   cpp << "  }\n";
   cpp << "  return model;\n";
+  cpp << "}\n\n";
+
+  cpp << "ModelAsset load_model(ModelId id) {\n";
+  cpp << "  std::size_t size = 0;\n";
+  cpp << "  const std::byte* data = get_model_data(id, &size);\n";
+  cpp << "  return decode_model_data(id, data, size);\n";
   cpp << "}\n\n";
 
   cpp << "}  // namespace " << ns << "\n";
