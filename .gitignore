@@ -39,3 +39,21 @@
 
 # debug information files
 *.dwo
+
+# CMake build directories and generated files
+/build/
+/build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Makefile
+install_manifest.txt
+
+# Ninja
+.ninja_deps
+.ninja_log
+
+# IDE
+.idea/
