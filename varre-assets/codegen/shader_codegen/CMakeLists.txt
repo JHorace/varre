@@ -42,6 +42,55 @@ if(VARRE_SPIRV_TOOLS_TARGET STREQUAL "")
   message(FATAL_ERROR "Unable to resolve a SPIRV-Tools library target.")
 endif()
 
+find_package(SPIRV-Reflect CONFIG QUIET)
+set(VARRE_SPIRV_REFLECT_TARGET "")
+foreach(
+  target_candidate
+  SPIRV-Reflect::SPIRV-Reflect
+  SPIRV-Reflect::spirv-reflect-static
+  SPIRV-Reflect::spirv-reflect-shared
+  spirv-reflect-static
+  spirv-reflect-shared
+)
+  if(TARGET ${target_candidate})
+    set(VARRE_SPIRV_REFLECT_TARGET ${target_candidate})
+    break()
+  endif()
+endforeach()
+
+if(VARRE_SPIRV_REFLECT_TARGET STREQUAL "")
+  set(SPIRV_REFLECT_EXECUTABLE OFF CACHE BOOL "Disable SPIRV-Reflect CLI executable." FORCE)
+  set(SPIRV_REFLECT_STATIC_LIB ON CACHE BOOL "Build SPIRV-Reflect static library." FORCE)
+  set(SPIRV_REFLECT_BUILD_TESTS OFF CACHE BOOL "Disable SPIRV-Reflect tests." FORCE)
+  set(SPIRV_REFLECT_INSTALL OFF CACHE BOOL "Disable SPIRV-Reflect install rules." FORCE)
+  set(FETCHCONTENT_UPDATES_DISCONNECTED_SPIRV_REFLECT ON CACHE BOOL "Disable network updates for fetched SPIRV-Reflect." FORCE)
+  FetchContent_Declare(
+    SPIRV_Reflect
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Reflect.git
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(SPIRV_Reflect)
+
+  foreach(
+    target_candidate
+    SPIRV-Reflect::SPIRV-Reflect
+    SPIRV-Reflect::spirv-reflect-static
+    SPIRV-Reflect::spirv-reflect-shared
+    spirv-reflect-static
+    spirv-reflect-shared
+  )
+    if(TARGET ${target_candidate})
+      set(VARRE_SPIRV_REFLECT_TARGET ${target_candidate})
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(VARRE_SPIRV_REFLECT_TARGET STREQUAL "")
+  message(FATAL_ERROR "Unable to resolve a SPIRV-Reflect library target.")
+endif()
+
 add_executable(shader_codegen main.cpp)
 target_compile_features(shader_codegen PRIVATE cxx_std_23)
 target_compile_definitions(
@@ -49,4 +98,4 @@ target_compile_definitions(
   PRIVATE
     VARRE_SLANGC_EXECUTABLE=\"${VARRE_SLANGC_EXECUTABLE}\"
 )
-target_link_libraries(shader_codegen PRIVATE ${VARRE_SPIRV_TOOLS_TARGET})
+target_link_libraries(shader_codegen PRIVATE ${VARRE_SPIRV_TOOLS_TARGET} ${VARRE_SPIRV_REFLECT_TARGET})

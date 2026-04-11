@@ -1,28 +1,37 @@
 set(VARRE_ASSETS_SHADERS_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(VARRE_ASSETS_SHADERS_GEN_HEADER "${VARRE_ASSETS_SHADERS_GEN_DIR}/shaders_generated.hpp")
 set(VARRE_ASSETS_SHADERS_GEN_SOURCE "${VARRE_ASSETS_SHADERS_GEN_DIR}/shaders_generated.cpp")
-set(VARRE_ASSETS_SHADERS_GENERATOR_DEPS
-  "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.hpp.in"
-  "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.cpp.in"
+set(VARRE_ASSETS_SHADERS_INPUT_DIR "${CMAKE_CURRENT_LIST_DIR}/slang")
+
+file(
+  GLOB_RECURSE
+  VARRE_ASSETS_SHADERS_SLANG_FILES
+  CONFIGURE_DEPENDS
+  "${VARRE_ASSETS_SHADERS_INPUT_DIR}/*.slang"
 )
 
-if(TARGET shader_codegen)
-  list(APPEND VARRE_ASSETS_SHADERS_GENERATOR_DEPS shader_codegen)
-endif()
+set(
+  VARRE_ASSETS_SHADERS_GENERATOR_ARGS
+  --input-root "${VARRE_ASSETS_SHADERS_INPUT_DIR}"
+  --output-dir "${VARRE_ASSETS_SHADERS_GEN_DIR}"
+  --emit-hpp "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
+  --emit-cpp "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+  --namespace "varre::assets"
+)
+
+set(VARRE_ASSETS_SHADERS_GENERATOR_DEPS
+  shader_codegen
+  ${VARRE_ASSETS_SHADERS_SLANG_FILES}
+)
 
 add_custom_command(
   OUTPUT
     "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
     "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${VARRE_ASSETS_SHADERS_GEN_DIR}"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.hpp.in"
-          "${VARRE_ASSETS_SHADERS_GEN_HEADER}"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_CURRENT_LIST_DIR}/stub/shaders_generated.cpp.in"
-          "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
+  COMMAND $<TARGET_FILE:shader_codegen> ${VARRE_ASSETS_SHADERS_GENERATOR_ARGS}
   DEPENDS ${VARRE_ASSETS_SHADERS_GENERATOR_DEPS}
-  COMMENT "Generating placeholder shader asset registry"
+  COMMENT "Generating shader asset registry"
   VERBATIM
 )
 
@@ -35,7 +44,6 @@ add_custom_target(
 
 add_library(
   varre_assets_shaders STATIC
-  src/shaders_stub.cpp
   "${VARRE_ASSETS_SHADERS_GEN_SOURCE}"
 )
 
