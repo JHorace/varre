@@ -1,3 +1,10 @@
+/**
+ * @file main.cpp
+ * @brief Build-time model asset code generator.
+ *
+ * The executable scans OBJ files, converts them to the engine's compact binary
+ * representation, and emits a generated C++ API that exposes embedded assets.
+ */
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -20,6 +27,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
+/**
+ * @brief Vertex layout used during conversion and serialization.
+ */
 struct Vertex {
   float px = 0.0F;
   float py = 0.0F;
@@ -34,17 +44,26 @@ struct Vertex {
   float v = 0.0F;
 };
 
+/**
+ * @brief Parsed geometry before binary packing.
+ */
 struct ParsedMesh {
   std::vector<Vertex> vertices;
   std::vector<std::uint32_t> indices;
 };
 
+/**
+ * @brief One generated model entry containing enum name and embedded bytes.
+ */
 struct ModelBlob {
   std::string enum_name;
   std::string display_name;
   std::vector<std::uint8_t> bytes;
 };
 
+/**
+ * @brief Command-line options for the code generator.
+ */
 struct CliOptions {
   fs::path input_root;
   fs::path output_dir;
@@ -53,16 +72,29 @@ struct CliOptions {
   std::string ns = "varre::assets";
 };
 
-[[noreturn]] void fail(const std::string& message) {
-  throw std::runtime_error(message);
-}
+/**
+ * @brief Throw a formatted fatal error.
+ * @param message Human-readable error message.
+ */
+[[noreturn]] void fail(const std::string &message) { throw std::runtime_error(message); }
 
-[[noreturn]] void fail_parse(const fs::path& file, std::size_t line_number, const std::string& message) {
+/**
+ * @brief Throw a parse error with file and line context.
+ * @param file Source file path being parsed.
+ * @param line_number 1-based line number.
+ * @param message Detailed parse failure message.
+ */
+[[noreturn]] void fail_parse(const fs::path &file, std::size_t line_number, const std::string &message) {
   std::ostringstream oss;
   oss << file.generic_string() << ":" << line_number << ": " << message;
   fail(oss.str());
 }
 
+/**
+ * @brief Trim leading and trailing ASCII whitespace.
+ * @param in Input string view.
+ * @return Trimmed copy.
+ */
 std::string trim(const std::string_view in) {
   std::size_t first = 0;
   while (first < in.size() && std::isspace(static_cast<unsigned char>(in[first])) != 0) {
@@ -77,7 +109,15 @@ std::string trim(const std::string_view in) {
   return std::string(in.substr(first, last - first));
 }
 
-int parse_int(const std::string& token, const fs::path& file, std::size_t line_number, const char* field_name) {
+/**
+ * @brief Parse an integer token with contextual diagnostics.
+ * @param token Source token text.
+ * @param file Source file path.
+ * @param line_number 1-based line number.
+ * @param field_name Semantic field label for diagnostics.
+ * @return Parsed integer value.
+ */
+int parse_int(const std::string &token, const fs::path &file, std::size_t line_number, const char *field_name) {
   try {
     std::size_t consumed = 0;
     const int value = std::stoi(token, &consumed, 10);
@@ -85,12 +125,20 @@ int parse_int(const std::string& token, const fs::path& file, std::size_t line_n
       fail_parse(file, line_number, std::string("invalid integer in ") + field_name + ": \"" + token + "\"");
     }
     return value;
-  } catch (const std::exception&) {
+  } catch (const std::exception &) {
     fail_parse(file, line_number, std::string("invalid integer in ") + field_name + ": \"" + token + "\"");
   }
 }
 
-float parse_float(const std::string& token, const fs::path& file, std::size_t line_number, const char* field_name) {
+/**
+ * @brief Parse a float token with contextual diagnostics.
+ * @param token Source token text.
+ * @param file Source file path.
+ * @param line_number 1-based line number.
+ * @param field_name Semantic field label for diagnostics.
+ * @return Parsed float value.
+ */
+float parse_float(const std::string &token, const fs::path &file, std::size_t line_number, const char *field_name) {
   try {
     std::size_t consumed = 0;
     const float value = std::stof(token, &consumed);
@@ -98,18 +146,28 @@ float parse_float(const std::string& token, const fs::path& file, std::size_t li
       fail_parse(file, line_number, std::string("invalid float in ") + field_name + ": \"" + token + "\"");
     }
     return value;
-  } catch (const std::exception&) {
+  } catch (const std::exception &) {
     fail_parse(file, line_number, std::string("invalid float in ") + field_name + ": \"" + token + "\"");
   }
 }
 
+/**
+ * @brief Parsed OBJ face index triplet (`v/vt/vn`).
+ */
 struct ObjIndex {
   int v = 0;
   int vt = 0;
   int vn = 0;
 };
 
-ObjIndex parse_obj_index(const std::string& token, const fs::path& file, std::size_t line_number) {
+/**
+ * @brief Parse a single OBJ face element token.
+ * @param token Token in OBJ `f` syntax (`v`, `v/vt`, or `v/vt/vn`).
+ * @param file Source file path.
+ * @param line_number 1-based source line.
+ * @return Parsed indices with `0` for omitted `vt`/`vn`.
+ */
+ObjIndex parse_obj_index(const std::string &token, const fs::path &file, std::size_t line_number) {
   ObjIndex idx{};
 
   const std::size_t first_slash = token.find('/');
@@ -144,12 +202,16 @@ ObjIndex parse_obj_index(const std::string& token, const fs::path& file, std::si
   return idx;
 }
 
-int resolve_obj_index(
-    int idx,
-    std::size_t count,
-    const fs::path& file,
-    std::size_t line_number,
-    const char* field_name) {
+/**
+ * @brief Resolve OBJ 1-based or negative index into a zero-based index.
+ * @param idx OBJ index value.
+ * @param count Number of available elements in the referenced array.
+ * @param file Source file path.
+ * @param line_number 1-based source line.
+ * @param field_name Semantic field label for diagnostics.
+ * @return Resolved zero-based index.
+ */
+int resolve_obj_index(int idx, std::size_t count, const fs::path &file, std::size_t line_number, const char *field_name) {
   if (idx == 0) {
     fail_parse(file, line_number, std::string(field_name) + " cannot be 0");
   }
@@ -163,7 +225,12 @@ int resolve_obj_index(
   return static_cast<int>(resolved);
 }
 
-std::string sanitize_identifier(const std::string& value) {
+/**
+ * @brief Normalize text into a deterministic C++ enum identifier fragment.
+ * @param value Raw string.
+ * @return Uppercase identifier-safe string.
+ */
+std::string sanitize_identifier(const std::string &value) {
   std::string out;
   out.reserve(value.size() + 8);
 
@@ -208,7 +275,13 @@ std::string sanitize_identifier(const std::string& value) {
   return compact;
 }
 
-std::string make_obj_enum_name(const fs::path& input_root, const fs::path& obj_path) {
+/**
+ * @brief Build a model enum name from an OBJ path.
+ * @param input_root Root path used for relative naming.
+ * @param obj_path OBJ path.
+ * @return Deterministic enum identifier.
+ */
+std::string make_obj_enum_name(const fs::path &input_root, const fs::path &obj_path) {
   fs::path rel = obj_path.lexically_relative(input_root);
   if (rel.empty()) {
     rel = obj_path.filename();
@@ -217,34 +290,40 @@ std::string make_obj_enum_name(const fs::path& input_root, const fs::path& obj_p
   return sanitize_identifier(rel.generic_string());
 }
 
-std::vector<fs::path> discover_obj_files(const fs::path& input_root) {
+/**
+ * @brief Discover OBJ files under the input root.
+ * @param input_root Root directory to scan recursively.
+ * @return Deterministically sorted OBJ path list.
+ */
+std::vector<fs::path> discover_obj_files(const fs::path &input_root) {
   std::vector<fs::path> obj_files;
   if (!fs::exists(input_root)) {
     return obj_files;
   }
 
-  for (const fs::directory_entry& entry : fs::recursive_directory_iterator(input_root)) {
+  for (const fs::directory_entry &entry : fs::recursive_directory_iterator(input_root)) {
     if (!entry.is_regular_file()) {
       continue;
     }
     const fs::path path = entry.path();
     std::string ext = path.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](const unsigned char c) {
-      return static_cast<char>(std::tolower(c));
-    });
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     if (ext == ".obj") {
       obj_files.push_back(path);
     }
   }
 
-  std::sort(obj_files.begin(), obj_files.end(), [](const fs::path& a, const fs::path& b) {
-    return a.generic_string() < b.generic_string();
-  });
+  std::sort(obj_files.begin(), obj_files.end(), [](const fs::path &a, const fs::path &b) { return a.generic_string() < b.generic_string(); });
   return obj_files;
 }
 
-ParsedMesh parse_obj(const fs::path& obj_path) {
+/**
+ * @brief Parse an OBJ file into a triangulated mesh.
+ * @param obj_path Path to OBJ file.
+ * @return Parsed mesh data.
+ */
+ParsedMesh parse_obj(const fs::path &obj_path) {
   std::ifstream input(obj_path);
   if (!input.is_open()) {
     fail("could not open OBJ file: " + obj_path.generic_string());
@@ -276,9 +355,9 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
         fail_parse(obj_path, line_number, "vertex position requires 3 floats");
       }
       positions.push_back({
-          parse_float(sx, obj_path, line_number, "vertex x"),
-          parse_float(sy, obj_path, line_number, "vertex y"),
-          parse_float(sz, obj_path, line_number, "vertex z"),
+        parse_float(sx, obj_path, line_number, "vertex x"),
+        parse_float(sy, obj_path, line_number, "vertex y"),
+        parse_float(sz, obj_path, line_number, "vertex z"),
       });
       continue;
     }
@@ -290,8 +369,8 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
         fail_parse(obj_path, line_number, "vertex UV requires at least 2 floats");
       }
       uvs.push_back({
-          parse_float(su, obj_path, line_number, "uv u"),
-          parse_float(sv, obj_path, line_number, "uv v"),
+        parse_float(su, obj_path, line_number, "uv u"),
+        parse_float(sv, obj_path, line_number, "uv v"),
       });
       continue;
     }
@@ -304,9 +383,9 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
         fail_parse(obj_path, line_number, "vertex normal requires 3 floats");
       }
       normals.push_back({
-          parse_float(sx, obj_path, line_number, "normal x"),
-          parse_float(sy, obj_path, line_number, "normal y"),
-          parse_float(sz, obj_path, line_number, "normal z"),
+        parse_float(sx, obj_path, line_number, "normal x"),
+        parse_float(sy, obj_path, line_number, "normal y"),
+        parse_float(sz, obj_path, line_number, "normal z"),
       });
       continue;
     }
@@ -324,11 +403,10 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
       std::vector<std::uint32_t> face_indices;
       face_indices.reserve(tokens.size());
 
-      for (const std::string& token : tokens) {
+      for (const std::string &token : tokens) {
         const ObjIndex obj_index = parse_obj_index(token, obj_path, line_number);
 
-        const int pos_idx =
-            resolve_obj_index(obj_index.v, positions.size(), obj_path, line_number, "position index");
+        const int pos_idx = resolve_obj_index(obj_index.v, positions.size(), obj_path, line_number, "position index");
         Vertex vertex{};
         vertex.px = positions[static_cast<std::size_t>(pos_idx)][0];
         vertex.py = positions[static_cast<std::size_t>(pos_idx)][1];
@@ -341,8 +419,7 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
         }
 
         if (obj_index.vn != 0) {
-          const int normal_idx =
-              resolve_obj_index(obj_index.vn, normals.size(), obj_path, line_number, "normal index");
+          const int normal_idx = resolve_obj_index(obj_index.vn, normals.size(), obj_path, line_number, "normal index");
           vertex.nx = normals[static_cast<std::size_t>(normal_idx)][0];
           vertex.ny = normals[static_cast<std::size_t>(normal_idx)][1];
           vertex.nz = normals[static_cast<std::size_t>(normal_idx)][2];
@@ -368,23 +445,36 @@ ParsedMesh parse_obj(const fs::path& obj_path) {
   return mesh;
 }
 
-void append_u32_le(std::vector<std::uint8_t>* bytes, const std::uint32_t value) {
+/**
+ * @brief Append a 32-bit unsigned integer in little-endian encoding.
+ * @param bytes Destination byte vector.
+ * @param value Value to encode.
+ */
+void append_u32_le(std::vector<std::uint8_t> *bytes, const std::uint32_t value) {
   bytes->push_back(static_cast<std::uint8_t>(value & 0xFFU));
   bytes->push_back(static_cast<std::uint8_t>((value >> 8U) & 0xFFU));
   bytes->push_back(static_cast<std::uint8_t>((value >> 16U) & 0xFFU));
   bytes->push_back(static_cast<std::uint8_t>((value >> 24U) & 0xFFU));
 }
 
-void append_f32_le(std::vector<std::uint8_t>* bytes, const float value) {
-  append_u32_le(bytes, std::bit_cast<std::uint32_t>(value));
-}
+/**
+ * @brief Append a 32-bit float in little-endian encoding.
+ * @param bytes Destination byte vector.
+ * @param value Value to encode.
+ */
+void append_f32_le(std::vector<std::uint8_t> *bytes, const float value) { append_u32_le(bytes, std::bit_cast<std::uint32_t>(value)); }
 
-std::vector<std::uint8_t> encode_binary(const ParsedMesh& mesh) {
+/**
+ * @brief Encode parsed mesh data into the engine binary layout.
+ * @param mesh Parsed mesh.
+ * @return Serialized binary payload.
+ */
+std::vector<std::uint8_t> encode_binary(const ParsedMesh &mesh) {
   std::vector<std::uint8_t> bytes;
   bytes.reserve(8 + mesh.vertices.size() * 44 + mesh.indices.size() * 4);
 
   append_u32_le(&bytes, static_cast<std::uint32_t>(mesh.vertices.size()));
-  for (const Vertex& v : mesh.vertices) {
+  for (const Vertex &v : mesh.vertices) {
     append_f32_le(&bytes, v.px);
     append_f32_le(&bytes, v.py);
     append_f32_le(&bytes, v.pz);
@@ -405,6 +495,10 @@ std::vector<std::uint8_t> encode_binary(const ParsedMesh& mesh) {
   return bytes;
 }
 
+/**
+ * @brief Build a synthetic cube mesh for a guaranteed built-in asset.
+ * @return Parsed mesh representing a cube.
+ */
 ParsedMesh make_cube_mesh() {
   ParsedMesh mesh;
 
@@ -415,12 +509,12 @@ ParsedMesh make_cube_mesh() {
 
   constexpr float h = 0.5F;
   const std::array<FaceDef, 6> faces = {{
-      {{{{-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}}}, {0.0F, 0.0F, 1.0F}},
-      {{{{h, -h, h}, {h, -h, -h}, {h, h, -h}, {h, h, h}}}, {1.0F, 0.0F, 0.0F}},
-      {{{{h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h}}}, {0.0F, 0.0F, -1.0F}},
-      {{{{-h, -h, -h}, {-h, -h, h}, {-h, h, h}, {-h, h, -h}}}, {-1.0F, 0.0F, 0.0F}},
-      {{{{-h, h, h}, {h, h, h}, {h, h, -h}, {-h, h, -h}}}, {0.0F, 1.0F, 0.0F}},
-      {{{{-h, -h, -h}, {h, -h, -h}, {h, -h, h}, {-h, -h, h}}}, {0.0F, -1.0F, 0.0F}},
+    {{{{-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}}}, {0.0F, 0.0F, 1.0F}},
+    {{{{h, -h, h}, {h, -h, -h}, {h, h, -h}, {h, h, h}}}, {1.0F, 0.0F, 0.0F}},
+    {{{{h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h}}}, {0.0F, 0.0F, -1.0F}},
+    {{{{-h, -h, -h}, {-h, -h, h}, {-h, h, h}, {-h, h, -h}}}, {-1.0F, 0.0F, 0.0F}},
+    {{{{-h, h, h}, {h, h, h}, {h, h, -h}, {-h, h, -h}}}, {0.0F, 1.0F, 0.0F}},
+    {{{{-h, -h, -h}, {h, -h, -h}, {h, -h, h}, {-h, -h, h}}}, {0.0F, -1.0F, 0.0F}},
   }};
 
   const std::array<std::array<float, 2>, 4> uv = {{{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}}};
@@ -451,7 +545,12 @@ ParsedMesh make_cube_mesh() {
   return mesh;
 }
 
-std::string make_byte_initializer(const std::vector<std::uint8_t>& bytes) {
+/**
+ * @brief Format bytes as a C++ hexadecimal initializer body.
+ * @param bytes Binary payload.
+ * @return Multi-line initializer text.
+ */
+std::string make_byte_initializer(const std::vector<std::uint8_t> &bytes) {
   std::ostringstream oss;
   oss << std::hex << std::setfill('0');
   for (std::size_t i = 0; i < bytes.size(); ++i) {
@@ -467,7 +566,12 @@ std::string make_byte_initializer(const std::vector<std::uint8_t>& bytes) {
   return oss.str();
 }
 
-void write_if_changed(const fs::path& output_path, const std::string& content) {
+/**
+ * @brief Write output file only when content changed.
+ * @param output_path Destination file path.
+ * @param content New content.
+ */
+void write_if_changed(const fs::path &output_path, const std::string &content) {
   std::error_code ec;
   if (fs::exists(output_path, ec)) {
     std::ifstream in(output_path, std::ios::binary);
@@ -486,18 +590,32 @@ void write_if_changed(const fs::path& output_path, const std::string& content) {
   out.close();
 }
 
-std::string emit_header(const std::string& ns, const std::vector<ModelBlob>& models) {
+/**
+ * @brief Emit generated public header text for model assets.
+ * @param ns Target C++ namespace.
+ * @param models Ordered model records.
+ * @return Header file contents.
+ */
+std::string emit_header(const std::string &ns, const std::vector<ModelBlob> &models) {
   std::ostringstream hpp;
+  hpp << "/**\n";
+  hpp << " * @file models_generated.hpp\n";
+  hpp << " * @brief Generated model asset API.\n";
+  hpp << " *\n";
+  hpp << " * This file is auto-generated by model_codegen. Do not edit manually.\n";
+  hpp << " */\n";
   hpp << "#pragma once\n\n";
   hpp << "#include <cstddef>\n";
   hpp << "#include <cstdint>\n";
   hpp << "#include <vector>\n\n";
   hpp << "namespace " << ns << " {\n\n";
+  hpp << "/** @brief Stable identifiers for embedded model assets. */\n";
   hpp << "enum class ModelId : std::uint32_t {\n";
   for (std::size_t i = 0; i < models.size(); ++i) {
     hpp << "  " << models[i].enum_name << " = " << i << ",\n";
   }
   hpp << "};\n\n";
+  hpp << "/** @brief Runtime vertex layout decoded from generated model blobs. */\n";
   hpp << "struct Vertex {\n";
   hpp << "  float px = 0.0F;\n";
   hpp << "  float py = 0.0F;\n";
@@ -511,21 +629,55 @@ std::string emit_header(const std::string& ns, const std::vector<ModelBlob>& mod
   hpp << "  float u = 0.0F;\n";
   hpp << "  float v = 0.0F;\n";
   hpp << "};\n\n";
+  hpp << "/** @brief Decoded model data for engine-side consumption. */\n";
   hpp << "struct ModelAsset {\n";
   hpp << "  ModelId id = ModelId::" << models.front().enum_name << ";\n";
   hpp << "  std::vector<Vertex> vertices;\n";
   hpp << "  std::vector<std::uint32_t> indices;\n";
   hpp << "};\n\n";
+  hpp << "/**\n";
+  hpp << " * @brief Access raw binary data for a model.\n";
+  hpp << " * @param id Model identifier.\n";
+  hpp << " * @param out_size Optional output byte size.\n";
+  hpp << " * @return Pointer to immutable model bytes.\n";
+  hpp << " */\n";
   hpp << "[[nodiscard]] const std::byte* get_model_data(ModelId id, std::size_t* out_size);\n";
+  hpp << "/**\n";
+  hpp << " * @brief Decode a model blob into runtime vectors.\n";
+  hpp << " * @param id Model identifier.\n";
+  hpp << " * @return Decoded model object.\n";
+  hpp << " */\n";
   hpp << "[[nodiscard]] ModelAsset load_model(ModelId id);\n";
+  hpp << "/**\n";
+  hpp << " * @brief Resolve the display name for a model.\n";
+  hpp << " * @param id Model identifier.\n";
+  hpp << " * @return Null-terminated model display name.\n";
+  hpp << " */\n";
   hpp << "[[nodiscard]] const char* model_name(ModelId id);\n";
+  hpp << "/**\n";
+  hpp << " * @brief Access the full set of generated model identifiers.\n";
+  hpp << " * @param out_count Optional output count.\n";
+  hpp << " * @return Pointer to immutable contiguous model-id array.\n";
+  hpp << " */\n";
   hpp << "[[nodiscard]] const ModelId* all_model_ids(std::size_t* out_count);\n\n";
   hpp << "}  // namespace " << ns << "\n";
   return hpp.str();
 }
 
-std::string emit_cpp(const std::string& ns, const std::vector<ModelBlob>& models) {
+/**
+ * @brief Emit generated implementation text for model assets.
+ * @param ns Target C++ namespace.
+ * @param models Ordered model records.
+ * @return Source file contents.
+ */
+std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models) {
   std::ostringstream cpp;
+  cpp << "/**\n";
+  cpp << " * @file models_generated.cpp\n";
+  cpp << " * @brief Generated model asset implementation.\n";
+  cpp << " *\n";
+  cpp << " * This file is auto-generated by model_codegen. Do not edit manually.\n";
+  cpp << " */\n";
   cpp << "#include \"models_generated.hpp\"\n\n";
   cpp << "#include <array>\n";
   cpp << "#include <cstring>\n";
@@ -540,21 +692,21 @@ std::string emit_cpp(const std::string& ns, const std::vector<ModelBlob>& models
   cpp << "  std::size_t size;\n";
   cpp << "};\n\n";
 
-  for (const ModelBlob& model : models) {
+  for (const ModelBlob &model : models) {
     cpp << "alignas(4) static constexpr std::uint8_t kModelData_" << model.enum_name << "[] = {";
     cpp << make_byte_initializer(model.bytes);
     cpp << "};\n\n";
   }
 
   cpp << "static constexpr std::array<ModelRecord, " << models.size() << "> kModels = {{\n";
-  for (const ModelBlob& model : models) {
+  for (const ModelBlob &model : models) {
     cpp << "    {ModelId::" << model.enum_name << ", \"" << model.display_name << "\", "
         << "kModelData_" << model.enum_name << ", sizeof(kModelData_" << model.enum_name << ")},\n";
   }
   cpp << "}};\n\n";
 
   cpp << "static constexpr std::array<ModelId, " << models.size() << "> kModelIds = {{\n";
-  for (const ModelBlob& model : models) {
+  for (const ModelBlob &model : models) {
     cpp << "    ModelId::" << model.enum_name << ",\n";
   }
   cpp << "}};\n\n";
@@ -655,11 +807,17 @@ std::string emit_cpp(const std::string& ns, const std::vector<ModelBlob>& models
   return cpp.str();
 }
 
-CliOptions parse_cli(int argc, char** argv) {
+/**
+ * @brief Parse command-line arguments.
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @return Parsed CLI options.
+ */
+CliOptions parse_cli(int argc, char **argv) {
   CliOptions opts;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg(argv[i]);
-    auto read_value = [&](const char* flag) -> std::string {
+    auto read_value = [&](const char *flag) -> std::string {
       if (i + 1 >= argc) {
         fail(std::string("missing value for ") + flag);
       }
@@ -689,9 +847,15 @@ CliOptions parse_cli(int argc, char** argv) {
   return opts;
 }
 
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
+/**
+ * @brief Program entry point.
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @return `0` on success, non-zero on failure.
+ */
+int main(int argc, char **argv) {
   try {
     const CliOptions opts = parse_cli(argc, argv);
 
@@ -703,26 +867,26 @@ int main(int argc, char** argv) {
 
     std::vector<ModelBlob> models;
     models.push_back(ModelBlob{
-        .enum_name = "CUBE",
-        .display_name = "cube",
-        .bytes = encode_binary(make_cube_mesh()),
+      .enum_name = "CUBE",
+      .display_name = "cube",
+      .bytes = encode_binary(make_cube_mesh()),
     });
 
     const std::vector<fs::path> obj_files = discover_obj_files(opts.input_root);
     std::unordered_map<std::string, std::size_t> collision_count;
 
-    for (const fs::path& obj_path : obj_files) {
+    for (const fs::path &obj_path : obj_files) {
       ParsedMesh mesh;
       try {
         mesh = parse_obj(obj_path);
-      } catch (const std::exception& ex) {
+      } catch (const std::exception &ex) {
         std::ostringstream oss;
         oss << "while processing " << obj_path.generic_string() << ": " << ex.what();
         throw std::runtime_error(oss.str());
       }
 
       std::string enum_name = make_obj_enum_name(opts.input_root, obj_path);
-      std::size_t& count = collision_count[enum_name];
+      std::size_t &count = collision_count[enum_name];
       ++count;
       if (count > 1) {
         enum_name += "_" + std::to_string(count);
@@ -734,9 +898,9 @@ int main(int argc, char** argv) {
       }
 
       models.push_back(ModelBlob{
-          .enum_name = std::move(enum_name),
-          .display_name = rel.generic_string(),
-          .bytes = encode_binary(mesh),
+        .enum_name = std::move(enum_name),
+        .display_name = rel.generic_string(),
+        .bytes = encode_binary(mesh),
       });
     }
 
@@ -745,10 +909,9 @@ int main(int argc, char** argv) {
     write_if_changed(opts.emit_hpp, hpp);
     write_if_changed(opts.emit_cpp, cpp);
 
-    std::cerr << "model_codegen: generated " << models.size() << " model asset(s) into "
-              << opts.output_dir.generic_string() << '\n';
+    std::cerr << "model_codegen: generated " << models.size() << " model asset(s) into " << opts.output_dir.generic_string() << '\n';
     return 0;
-  } catch (const std::exception& ex) {
+  } catch (const std::exception &ex) {
     std::cerr << "model_codegen: error: " << ex.what() << '\n';
     return 1;
   }
