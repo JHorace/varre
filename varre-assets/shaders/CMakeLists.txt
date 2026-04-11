@@ -56,3 +56,8 @@ target_include_directories(
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${VARRE_ASSETS_SHADERS_GEN_DIR}"
 )
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
+
