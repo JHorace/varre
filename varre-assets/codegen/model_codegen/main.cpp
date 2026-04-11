@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -55,11 +56,22 @@ struct ParsedMesh {
 };
 
 /**
+ * @brief Full parsed model payload and source metadata.
+ */
+struct ParsedModel {
+  ParsedMesh mesh;
+  std::string shape_names;
+};
+
+/**
  * @brief One generated model entry containing enum name and embedded bytes.
  */
 struct ModelBlob {
   std::string enum_name;
   std::string display_name;
+  std::string source_path;
+  std::string shape_names;
+  std::uint32_t format_flags = 0;
   std::vector<std::uint8_t> bytes;
 };
 
@@ -71,6 +83,13 @@ struct MeshConventions {
   bool flip_winding = false;
   bool flip_uv_v = false;
 };
+
+constexpr std::uint32_t kModelBinaryMagic = 0x444D5256U; // "VRMD"
+constexpr std::uint32_t kModelBinaryVersion = 1U;
+
+constexpr std::uint32_t kModelFormatFlagFlipHandedness = 1U << 0U;
+constexpr std::uint32_t kModelFormatFlagFlipWinding = 1U << 1U;
+constexpr std::uint32_t kModelFormatFlagFlipUvV = 1U << 2U;
 
 /**
  * @brief Command-line options for the code generator.
@@ -197,11 +216,30 @@ std::vector<fs::path> discover_obj_files(const fs::path &input_root) {
 }
 
 /**
+ * @brief Encode mesh-convention settings into model-format flags.
+ * @param conventions Active conversion settings.
+ * @return Bit-mask stored in generated binary header.
+ */
+std::uint32_t to_format_flags(const MeshConventions &conventions) {
+  std::uint32_t flags = 0U;
+  if (conventions.flip_handedness) {
+    flags |= kModelFormatFlagFlipHandedness;
+  }
+  if (conventions.flip_winding) {
+    flags |= kModelFormatFlagFlipWinding;
+  }
+  if (conventions.flip_uv_v) {
+    flags |= kModelFormatFlagFlipUvV;
+  }
+  return flags;
+}
+
+/**
  * @brief Parse an OBJ file into a triangulated mesh.
  * @param obj_path Path to OBJ file.
  * @return Parsed mesh data.
  */
-ParsedMesh parse_obj(const fs::path &obj_path, const MeshConventions &conventions) {
+ParsedModel parse_obj(const fs::path &obj_path, const MeshConventions &conventions) {
   tinyobj::ObjReaderConfig config;
   config.triangulate = true;
   config.vertex_color = false;
@@ -251,8 +289,15 @@ ParsedMesh parse_obj(const fs::path &obj_path, const MeshConventions &convention
   ParsedMesh mesh;
   std::unordered_map<VertexKey, std::uint32_t, VertexKeyHash> vertex_map;
   std::vector<bool> vertex_has_explicit_normal;
+  std::vector<std::string> shape_names;
+  shape_names.reserve(shapes.size());
   for (std::size_t shape_index = 0; shape_index < shapes.size(); ++shape_index) {
     const tinyobj::shape_t &shape = shapes[shape_index];
+    if (shape.name.empty()) {
+      shape_names.push_back(std::string("<unnamed#") + std::to_string(shape_index) + ">");
+    } else {
+      shape_names.push_back(shape.name);
+    }
     std::size_t offset = 0;
 
     for (std::size_t face_index = 0; face_index < shape.mesh.num_face_vertices.size(); ++face_index) {
@@ -325,6 +370,9 @@ ParsedMesh parse_obj(const fs::path &obj_path, const MeshConventions &convention
           }
         }
 
+        if (mesh.vertices.size() >= static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+          fail("vertex count exceeds 32-bit index limit for: " + obj_path.generic_string());
+        }
         mesh.vertices.push_back(vertex);
         const std::uint32_t new_index = static_cast<std::uint32_t>(mesh.vertices.size() - 1U);
         vertex_map.emplace(key, new_index);
@@ -431,7 +479,18 @@ ParsedMesh parse_obj(const fs::path &obj_path, const MeshConventions &convention
     }
   }
 
-  return mesh;
+  std::ostringstream shape_summary;
+  for (std::size_t i = 0; i < shape_names.size(); ++i) {
+    if (i > 0) {
+      shape_summary << ",";
+    }
+    shape_summary << shape_names[i];
+  }
+
+  return ParsedModel{
+    .mesh = std::move(mesh),
+    .shape_names = shape_summary.str(),
+  };
 }
 
 /**
@@ -456,12 +515,23 @@ void append_f32_le(std::vector<std::uint8_t> *bytes, const float value) { append
 /**
  * @brief Encode parsed mesh data into the engine binary layout.
  * @param mesh Parsed mesh.
+ * @param format_flags Format flags describing applied import conventions.
  * @return Serialized binary payload.
  */
-std::vector<std::uint8_t> encode_binary(const ParsedMesh &mesh) {
-  std::vector<std::uint8_t> bytes;
-  bytes.reserve(8 + mesh.vertices.size() * 44 + mesh.indices.size() * 4);
+std::vector<std::uint8_t> encode_binary(const ParsedMesh &mesh, const std::uint32_t format_flags) {
+  if (mesh.vertices.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    fail("vertex count exceeds 32-bit range during binary encode");
+  }
+  if (mesh.indices.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+    fail("index count exceeds 32-bit range during binary encode");
+  }
 
+  std::vector<std::uint8_t> bytes;
+  bytes.reserve(16 + mesh.vertices.size() * 44 + mesh.indices.size() * 4);
+
+  append_u32_le(&bytes, kModelBinaryMagic);
+  append_u32_le(&bytes, kModelBinaryVersion);
+  append_u32_le(&bytes, format_flags);
   append_u32_le(&bytes, static_cast<std::uint32_t>(mesh.vertices.size()));
   for (const Vertex &v : mesh.vertices) {
     append_f32_le(&bytes, v.px);
@@ -581,6 +651,39 @@ std::string make_byte_initializer(const std::vector<std::uint8_t> &bytes) {
 }
 
 /**
+ * @brief Escape a string for safe emission as a C++ string literal.
+ * @param value Raw string.
+ * @return Escaped literal content (without surrounding quotes).
+ */
+std::string escape_cpp_string(const std::string &value) {
+  std::string out;
+  out.reserve(value.size() + 16);
+  for (const unsigned char ch : value) {
+    switch (ch) {
+    case '\\':
+      out += "\\\\";
+      break;
+    case '\"':
+      out += "\\\"";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      out.push_back(static_cast<char>(ch));
+      break;
+    }
+  }
+  return out;
+}
+
+/**
  * @brief Write output file only when content changed.
  * @param output_path Destination file path.
  * @param content New content.
@@ -695,6 +798,7 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "#include \"models_generated.hpp\"\n\n";
   cpp << "#include <array>\n";
   cpp << "#include <cstring>\n";
+  cpp << "#include <limits>\n";
   cpp << "#include <stdexcept>\n";
   cpp << "#include <string>\n\n";
   cpp << "namespace " << ns << " {\n\n";
@@ -702,9 +806,17 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "struct ModelRecord {\n";
   cpp << "  ModelId id;\n";
   cpp << "  const char* name;\n";
+  cpp << "  const char* source_path;\n";
+  cpp << "  const char* shape_names;\n";
+  cpp << "  std::uint32_t format_flags;\n";
   cpp << "  const std::uint8_t* data;\n";
   cpp << "  std::size_t size;\n";
   cpp << "};\n\n";
+  cpp << "constexpr std::uint32_t kModelBinaryMagic = 0x" << std::hex << std::setw(8) << std::setfill('0') << kModelBinaryMagic << std::dec << "U;\n";
+  cpp << "constexpr std::uint32_t kModelBinaryVersion = " << kModelBinaryVersion << "U;\n";
+  cpp << "constexpr std::size_t kVertexStrideBytes = 44U;\n";
+  cpp << "constexpr std::uint32_t kMaxVertexCount = 50'000'000U;\n";
+  cpp << "constexpr std::uint32_t kMaxIndexCount = 150'000'000U;\n\n";
 
   for (const ModelBlob &model : models) {
     cpp << "alignas(4) static constexpr std::uint8_t kModelData_" << model.enum_name << "[] = {";
@@ -714,7 +826,12 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
 
   cpp << "static constexpr std::array<ModelRecord, " << models.size() << "> kModels = {{\n";
   for (const ModelBlob &model : models) {
-    cpp << "    {ModelId::" << model.enum_name << ", \"" << model.display_name << "\", "
+    const std::string display_name_escaped = escape_cpp_string(model.display_name);
+    const std::string source_path_escaped = escape_cpp_string(model.source_path);
+    const std::string shape_names_escaped = escape_cpp_string(model.shape_names);
+    cpp << "    {ModelId::" << model.enum_name << ", \"" << display_name_escaped << "\", "
+        << "\"" << source_path_escaped << "\", "
+        << "\"" << shape_names_escaped << "\", " << model.format_flags << "U, "
         << "kModelData_" << model.enum_name << ", sizeof(kModelData_" << model.enum_name << ")},\n";
   }
   cpp << "}};\n\n";
@@ -734,22 +851,45 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "  return nullptr;\n";
   cpp << "}\n\n";
 
-  cpp << "std::uint32_t read_u32(const std::uint8_t* data, std::size_t size, std::size_t* offset, "
-         "ModelId id, const char* field) {\n";
-  cpp << "  if (*offset + 4 > size) {\n";
-  cpp << "    throw std::runtime_error(std::string(\"model \") + model_name(id) + \": truncated while reading \" + field);\n";
+  cpp << "std::string model_context(const ModelRecord* record) {\n";
+  cpp << "  return std::string(\"model \") + record->name + \" (source: \" + record->source_path + \", shapes: \" + record->shape_names + \")\";\n";
+  cpp << "}\n\n";
+
+  cpp << "[[noreturn]] void fail_decode(const ModelRecord* record, const std::string& reason) {\n";
+  cpp << "  throw std::runtime_error(model_context(record) + \": \" + reason);\n";
+  cpp << "}\n\n";
+
+  cpp << "bool checked_add(std::size_t a, std::size_t b, std::size_t* out) {\n";
+  cpp << "  if (a > std::numeric_limits<std::size_t>::max() - b) {\n";
+  cpp << "    return false;\n";
+  cpp << "  }\n";
+  cpp << "  *out = a + b;\n";
+  cpp << "  return true;\n";
+  cpp << "}\n\n";
+
+  cpp << "bool checked_mul(std::size_t a, std::size_t b, std::size_t* out) {\n";
+  cpp << "  if (a != 0U && b > std::numeric_limits<std::size_t>::max() / a) {\n";
+  cpp << "    return false;\n";
+  cpp << "  }\n";
+  cpp << "  *out = a * b;\n";
+  cpp << "  return true;\n";
+  cpp << "}\n\n";
+
+  cpp << "std::uint32_t read_u32(const std::uint8_t* data, std::size_t size, std::size_t* offset, const ModelRecord* record, const char* field) {\n";
+  cpp << "  if (*offset > size || size - *offset < 4U) {\n";
+  cpp << "    fail_decode(record, std::string(\"truncated while reading \") + field);\n";
   cpp << "  }\n";
   cpp << "  const std::uint32_t value =\n";
   cpp << "      static_cast<std::uint32_t>(data[*offset]) |\n";
   cpp << "      (static_cast<std::uint32_t>(data[*offset + 1]) << 8U) |\n";
   cpp << "      (static_cast<std::uint32_t>(data[*offset + 2]) << 16U) |\n";
   cpp << "      (static_cast<std::uint32_t>(data[*offset + 3]) << 24U);\n";
-  cpp << "  *offset += 4;\n";
+  cpp << "  *offset += 4U;\n";
   cpp << "  return value;\n";
   cpp << "}\n\n";
 
-  cpp << "float read_f32(const std::uint8_t* data, std::size_t size, std::size_t* offset, ModelId id, const char* field) {\n";
-  cpp << "  const std::uint32_t bits = read_u32(data, size, offset, id, field);\n";
+  cpp << "float read_f32(const std::uint8_t* data, std::size_t size, std::size_t* offset, const ModelRecord* record, const char* field) {\n";
+  cpp << "  const std::uint32_t bits = read_u32(data, size, offset, record, field);\n";
   cpp << "  float out = 0.0F;\n";
   cpp << "  std::memcpy(&out, &bits, sizeof(float));\n";
   cpp << "  return out;\n";
@@ -771,7 +911,7 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "const std::byte* get_model_data(ModelId id, std::size_t* out_size) {\n";
   cpp << "  const ModelRecord* record = find_record(id);\n";
   cpp << "  if (record == nullptr) {\n";
-  cpp << "    throw std::runtime_error(\"unknown ModelId\");\n";
+  cpp << "    throw std::runtime_error(std::string(\"unknown ModelId: \") + std::to_string(static_cast<std::uint32_t>(id)));\n";
   cpp << "  }\n";
   cpp << "  if (out_size != nullptr) {\n";
   cpp << "    *out_size = record->size;\n";
@@ -782,37 +922,74 @@ std::string emit_cpp(const std::string &ns, const std::vector<ModelBlob> &models
   cpp << "ModelAsset load_model(ModelId id) {\n";
   cpp << "  const ModelRecord* record = find_record(id);\n";
   cpp << "  if (record == nullptr) {\n";
-  cpp << "    throw std::runtime_error(\"unknown ModelId\");\n";
+  cpp << "    throw std::runtime_error(std::string(\"unknown ModelId: \") + std::to_string(static_cast<std::uint32_t>(id)));\n";
   cpp << "  }\n\n";
   cpp << "  const std::uint8_t* data = record->data;\n";
   cpp << "  const std::size_t size = record->size;\n";
   cpp << "  std::size_t offset = 0;\n\n";
+  cpp << "  const std::uint32_t magic = read_u32(data, size, &offset, record, \"magic\");\n";
+  cpp << "  if (magic != kModelBinaryMagic) {\n";
+  cpp << "    fail_decode(record, \"invalid model binary magic\");\n";
+  cpp << "  }\n";
+  cpp << "  const std::uint32_t version = read_u32(data, size, &offset, record, \"version\");\n";
+  cpp << "  if (version != kModelBinaryVersion) {\n";
+  cpp << "    fail_decode(record, \"unsupported model binary version\");\n";
+  cpp << "  }\n";
+  cpp << "  const std::uint32_t _flags = read_u32(data, size, &offset, record, \"flags\");\n";
+  cpp << "  (void)_flags;\n";
+
   cpp << "  ModelAsset model;\n";
   cpp << "  model.id = id;\n\n";
-  cpp << "  const std::uint32_t vertex_count = read_u32(data, size, &offset, id, \"vertex_count\");\n";
-  cpp << "  model.vertices.reserve(vertex_count);\n";
+  cpp << "  const std::uint32_t vertex_count = read_u32(data, size, &offset, record, \"vertex_count\");\n";
+  cpp << "  if (vertex_count > kMaxVertexCount) {\n";
+  cpp << "    fail_decode(record, \"vertex_count exceeds safety limit\");\n";
+  cpp << "  }\n";
+  cpp << "  std::size_t vertex_bytes = 0;\n";
+  cpp << "  if (!checked_mul(static_cast<std::size_t>(vertex_count), kVertexStrideBytes, &vertex_bytes)) {\n";
+  cpp << "    fail_decode(record, \"vertex payload size overflow\");\n";
+  cpp << "  }\n";
+  cpp << "  std::size_t vertex_end = 0;\n";
+  cpp << "  if (!checked_add(offset, vertex_bytes, &vertex_end) || vertex_end > size) {\n";
+  cpp << "    fail_decode(record, \"truncated vertex payload\");\n";
+  cpp << "  }\n";
+  cpp << "  model.vertices.reserve(static_cast<std::size_t>(vertex_count));\n";
   cpp << "  for (std::uint32_t i = 0; i < vertex_count; ++i) {\n";
   cpp << "    Vertex v;\n";
-  cpp << "    v.px = read_f32(data, size, &offset, id, \"px\");\n";
-  cpp << "    v.py = read_f32(data, size, &offset, id, \"py\");\n";
-  cpp << "    v.pz = read_f32(data, size, &offset, id, \"pz\");\n";
-  cpp << "    v.cx = read_f32(data, size, &offset, id, \"cx\");\n";
-  cpp << "    v.cy = read_f32(data, size, &offset, id, \"cy\");\n";
-  cpp << "    v.cz = read_f32(data, size, &offset, id, \"cz\");\n";
-  cpp << "    v.nx = read_f32(data, size, &offset, id, \"nx\");\n";
-  cpp << "    v.ny = read_f32(data, size, &offset, id, \"ny\");\n";
-  cpp << "    v.nz = read_f32(data, size, &offset, id, \"nz\");\n";
-  cpp << "    v.u = read_f32(data, size, &offset, id, \"u\");\n";
-  cpp << "    v.v = read_f32(data, size, &offset, id, \"v\");\n";
+  cpp << "    v.px = read_f32(data, size, &offset, record, \"px\");\n";
+  cpp << "    v.py = read_f32(data, size, &offset, record, \"py\");\n";
+  cpp << "    v.pz = read_f32(data, size, &offset, record, \"pz\");\n";
+  cpp << "    v.cx = read_f32(data, size, &offset, record, \"cx\");\n";
+  cpp << "    v.cy = read_f32(data, size, &offset, record, \"cy\");\n";
+  cpp << "    v.cz = read_f32(data, size, &offset, record, \"cz\");\n";
+  cpp << "    v.nx = read_f32(data, size, &offset, record, \"nx\");\n";
+  cpp << "    v.ny = read_f32(data, size, &offset, record, \"ny\");\n";
+  cpp << "    v.nz = read_f32(data, size, &offset, record, \"nz\");\n";
+  cpp << "    v.u = read_f32(data, size, &offset, record, \"u\");\n";
+  cpp << "    v.v = read_f32(data, size, &offset, record, \"v\");\n";
   cpp << "    model.vertices.push_back(v);\n";
   cpp << "  }\n\n";
-  cpp << "  const std::uint32_t index_count = read_u32(data, size, &offset, id, \"index_count\");\n";
-  cpp << "  model.indices.reserve(index_count);\n";
+  cpp << "  const std::uint32_t index_count = read_u32(data, size, &offset, record, \"index_count\");\n";
+  cpp << "  if (index_count > kMaxIndexCount) {\n";
+  cpp << "    fail_decode(record, \"index_count exceeds safety limit\");\n";
+  cpp << "  }\n";
+  cpp << "  std::size_t index_bytes = 0;\n";
+  cpp << "  if (!checked_mul(static_cast<std::size_t>(index_count), sizeof(std::uint32_t), &index_bytes)) {\n";
+  cpp << "    fail_decode(record, \"index payload size overflow\");\n";
+  cpp << "  }\n";
+  cpp << "  std::size_t index_end = 0;\n";
+  cpp << "  if (!checked_add(offset, index_bytes, &index_end) || index_end > size) {\n";
+  cpp << "    fail_decode(record, \"truncated index payload\");\n";
+  cpp << "  }\n";
+  cpp << "  model.indices.reserve(static_cast<std::size_t>(index_count));\n";
   cpp << "  for (std::uint32_t i = 0; i < index_count; ++i) {\n";
-  cpp << "    model.indices.push_back(read_u32(data, size, &offset, id, \"index\"));\n";
+  cpp << "    const std::uint32_t index = read_u32(data, size, &offset, record, \"index\");\n";
+  cpp << "    if (index >= vertex_count) {\n";
+  cpp << "      fail_decode(record, \"index references vertex out of range\");\n";
+  cpp << "    }\n";
+  cpp << "    model.indices.push_back(index);\n";
   cpp << "  }\n\n";
   cpp << "  if (offset != size) {\n";
-  cpp << "    throw std::runtime_error(std::string(\"model \") + model_name(id) + \": trailing bytes in asset blob\");\n";
+  cpp << "    fail_decode(record, \"trailing bytes in asset blob\");\n";
   cpp << "  }\n";
   cpp << "  return model;\n";
   cpp << "}\n\n";
@@ -878,6 +1055,7 @@ CliOptions parse_cli(int argc, char **argv) {
 int main(int argc, char **argv) {
   try {
     const CliOptions opts = parse_cli(argc, argv);
+    const std::uint32_t format_flags = to_format_flags(opts.conventions);
 
     std::error_code ec;
     fs::create_directories(opts.output_dir, ec);
@@ -889,16 +1067,19 @@ int main(int argc, char **argv) {
     models.push_back(ModelBlob{
       .enum_name = "CUBE",
       .display_name = "cube",
-      .bytes = encode_binary(make_cube_mesh(opts.conventions)),
+      .source_path = "<builtin>",
+      .shape_names = "cube",
+      .format_flags = format_flags,
+      .bytes = encode_binary(make_cube_mesh(opts.conventions), format_flags),
     });
 
     const std::vector<fs::path> obj_files = discover_obj_files(opts.input_root);
     std::unordered_map<std::string, std::size_t> collision_count;
 
     for (const fs::path &obj_path : obj_files) {
-      ParsedMesh mesh;
+      ParsedModel parsed_model;
       try {
-        mesh = parse_obj(obj_path, opts.conventions);
+        parsed_model = parse_obj(obj_path, opts.conventions);
       } catch (const std::exception &ex) {
         std::ostringstream oss;
         oss << "while processing " << obj_path.generic_string() << ": " << ex.what();
@@ -920,7 +1101,10 @@ int main(int argc, char **argv) {
       models.push_back(ModelBlob{
         .enum_name = std::move(enum_name),
         .display_name = rel.generic_string(),
-        .bytes = encode_binary(mesh),
+        .source_path = rel.generic_string(),
+        .shape_names = std::move(parsed_model.shape_names),
+        .format_flags = format_flags,
+        .bytes = encode_binary(parsed_model.mesh, format_flags),
       });
     }
 

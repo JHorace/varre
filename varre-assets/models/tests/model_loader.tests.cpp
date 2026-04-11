@@ -10,6 +10,16 @@
 
 #include "varre/assets/models.hpp"
 
+namespace {
+std::uint32_t read_u32_le(const std::byte *data, std::size_t offset) {
+  const auto b0 = static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(data[offset + 0]));
+  const auto b1 = static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(data[offset + 1]));
+  const auto b2 = static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(data[offset + 2]));
+  const auto b3 = static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(data[offset + 3]));
+  return b0 | (b1 << 8U) | (b2 << 16U) | (b3 << 24U);
+}
+} // namespace
+
 TEST_CASE("model loader enumerates embedded assets", "[models]") {
   std::size_t count = 0;
   const varre::assets::ModelId *ids = varre::assets::all_model_ids(&count);
@@ -50,6 +60,33 @@ TEST_CASE("model loader rejects unknown IDs", "[models]") {
 
   REQUIRE_THROWS_AS(varre::assets::get_model_data(invalid_id, nullptr), std::runtime_error);
   REQUIRE_THROWS_AS(varre::assets::load_model(invalid_id), std::runtime_error);
+}
+
+TEST_CASE("model binary header has magic/version/flags", "[models]") {
+  constexpr std::uint32_t kExpectedMagic = 0x444D5256U; // "VRMD"
+  constexpr std::uint32_t kExpectedVersion = 1U;
+
+  std::size_t count = 0;
+  const varre::assets::ModelId *ids = varre::assets::all_model_ids(&count);
+  REQUIRE(ids != nullptr);
+  REQUIRE(count >= 1U);
+
+  for (std::size_t i = 0; i < count; ++i) {
+    std::size_t byte_size = 0;
+    const std::byte *data = varre::assets::get_model_data(ids[i], &byte_size);
+    REQUIRE(data != nullptr);
+    REQUIRE(byte_size >= 16U);
+
+    const std::uint32_t magic = read_u32_le(data, 0U);
+    const std::uint32_t version = read_u32_le(data, 4U);
+    const std::uint32_t flags = read_u32_le(data, 8U);
+    const std::uint32_t vertex_count = read_u32_le(data, 12U);
+
+    REQUIRE(magic == kExpectedMagic);
+    REQUIRE(version == kExpectedVersion);
+    REQUIRE((flags & ~0x7U) == 0U);
+    REQUIRE(vertex_count > 0U);
+  }
 }
 
 TEST_CASE("model loader generates normals when OBJ lacks them", "[models]") {
