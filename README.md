@@ -25,6 +25,32 @@ This repository is being built using **guided AI generation**:
 - `varre-engine`: CMake/module scaffolding in place, target internals deferred
 - `varre-app`: CMake/module scaffolding in place, target internals deferred
 
+## Engine Port Roadmap (As Of 2026-04-12)
+
+Planned implementation sequence for `varre-engine`:
+
+1. Create `varre_engine` library target and wire `varre::engine_dependencies`.
+2. Define public API headers first (`Engine`, `DeviceContext`, `RenderContext`, config structs, errors).
+3. Port Rust module layout with near 1:1 C++ mapping.
+4. Implement core Vulkan init path:
+   - instance + validation + debug messenger (`vk::raii`)
+   - physical device + queue discovery
+   - logical device + feature chains (`vk::StructureChain`)
+   - queue handles and frame state (`NUM_FRAMES_IN_FLIGHT = 3`)
+   - command pools/buffers and one-time submit path
+5. Implement surface/swapchain flow behind platform-provided interfaces (no windowing dependency inside engine).
+6. Integrate generated assets (`varre_assets` shaders/models), then texture upload path.
+7. Port render contexts in order: `triangle`, then `mesh_simple`.
+8. Add lifecycle/recreation correctness checks and tests (queue selection, feature composition, asset lookup, smoke init).
+
+Explicit design choices for the port:
+
+- Prefer `vk::raii` ownership over manual Vulkan destroy patterns.
+- Keep platform/window adapter boundaries outside `varre-engine`.
+- Use VMA for memory allocation from first engine implementation.
+- Use structured diagnostics (`fmt`/`spdlog`) rather than ad hoc prints.
+- Keep unfinished components as explicit stubs.
+
 ### Explicitly Not Implemented Yet
 
 - `varre-iced-renderer`

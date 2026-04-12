@@ -47,6 +47,49 @@ Convert `https://github.com/JHorace/vulkan-rust-engine` into a C++/CMake project
   - `varre-engine/src/render_context/{triangle,mesh_simple}`
   - `varre-app/src/{triangle,mesh_simple}`
 
+## Engine Execution Plan (Current)
+Use this sequence when implementing `varre-engine` internals.
+
+1. Create `varre_engine` and wire it to `varre::engine_dependencies`.
+2. Define public engine API headers first (`Engine`, `DeviceContext`, `RenderContext`, config structs, error types).
+3. Port module structure from Rust with near 1:1 C++ mapping:
+   - `physical_device_utils`
+   - `extensions`
+   - `memory_utils`
+   - `command_buffers`
+   - `mesh_utils`
+   - `shader_utils`
+   - `render_context/triangle`
+   - `render_context/mesh_simple`
+   - window/surface provider abstraction (no direct SDL in engine)
+4. Implement instance creation with `vk::raii::Context` + `vk::raii::Instance`, validation toggles, and debug messenger.
+5. Implement physical-device selection and queue-family discovery.
+6. Implement logical device creation using Vulkan 1.3 + extension feature chains (`vk::StructureChain`).
+7. Implement per-frame state with RAII synchronization (`NUM_FRAMES_IN_FLIGHT = 3`).
+8. Implement command infrastructure (`vk::raii::CommandPool`, per-frame command buffers, one-time submit).
+9. Implement surface/swapchain path behind engine-facing platform interfaces.
+10. Port shader integration to `varre_assets` generated shader APIs.
+11. Port mesh/model upload integration to `varre_assets` models APIs + VMA-backed buffers/images.
+12. Port texture upload path (staging, transitions, view/sampler creation) with `stb_image`.
+13. Port render contexts in order: `triangle`, then `mesh_simple`.
+14. Add cleanup/lifetime checks and validation-friendly errors for swapchain recreation flows.
+15. Add tests for queue selection, feature-chain composition, shader/model lookup integration, and smoke initialization.
+
+### Planned Deviations / Improvements
+- Use `vk::raii` ownership consistently instead of manual destroy paths.
+- Keep surface/window provider outside `varre-engine`.
+- Use VMA from first engine implementation (avoid handwritten Vulkan memory allocation paths).
+- Use `fmt`/`spdlog` for structured diagnostics.
+- Normalize extension/feature enablement via typed helper builders (`vk::StructureChain`).
+- Prefer explicit frame-context structs over hidden mutable synchronization state.
+
+### Recommended Implementation Order
+1. Core init path: instance -> device -> queues -> command pool.
+2. Swapchain + frame-loop primitives.
+3. Assets integration (shaders/models/textures).
+4. Render contexts (`triangle`, then `mesh_simple`).
+5. Test hardening and resize/recreate edge cases.
+
 ## Implementation Rules
 - Implement CMake structure first, then target internals.
 - Preserve nested module/subproject layout when adding targets.
