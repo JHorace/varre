@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -288,6 +289,141 @@ public:
    * @param enabled Rasterizer discard state.
    */
   void set_rasterizer_discard_enable(bool enabled) const;
+
+  /**
+   * @brief Enable or disable depth-bias state dynamically.
+   * @param enabled Depth-bias enable state.
+   */
+  void set_depth_bias_enable(bool enabled) const;
+
+  /**
+   * @brief Set dynamic depth-bias values.
+   * @param constant_factor Constant factor.
+   * @param clamp Depth-bias clamp.
+   * @param slope_factor Slope factor.
+   */
+  void set_depth_bias(float constant_factor, float clamp, float slope_factor) const;
+
+  /**
+   * @brief Enable or disable depth-bounds testing dynamically.
+   * @param enabled Depth-bounds enable state.
+   */
+  void set_depth_bounds_test_enable(bool enabled) const;
+
+  /**
+   * @brief Set dynamic depth-bounds range.
+   * @param min_depth_bounds Lower bound.
+   * @param max_depth_bounds Upper bound.
+   */
+  void set_depth_bounds(float min_depth_bounds, float max_depth_bounds) const;
+
+  /**
+   * @brief Enable or disable stencil testing dynamically.
+   * @param enabled Stencil-test enable state.
+   */
+  void set_stencil_test_enable(bool enabled) const;
+
+  /**
+   * @brief Set dynamic stencil operations.
+   * @param face_mask Stencil face mask.
+   * @param fail_op Operation when stencil test fails.
+   * @param pass_op Operation when stencil+depth tests pass.
+   * @param depth_fail_op Operation when stencil passes and depth fails.
+   * @param compare_op Stencil compare operator.
+   */
+  void set_stencil_op(vk::StencilFaceFlags face_mask, vk::StencilOp fail_op, vk::StencilOp pass_op, vk::StencilOp depth_fail_op,
+                      vk::CompareOp compare_op) const;
+
+  /**
+   * @brief Set dynamic stencil compare mask.
+   * @param face_mask Stencil face mask.
+   * @param compare_mask Compare mask.
+   */
+  void set_stencil_compare_mask(vk::StencilFaceFlags face_mask, std::uint32_t compare_mask) const;
+
+  /**
+   * @brief Set dynamic stencil write mask.
+   * @param face_mask Stencil face mask.
+   * @param write_mask Write mask.
+   */
+  void set_stencil_write_mask(vk::StencilFaceFlags face_mask, std::uint32_t write_mask) const;
+
+  /**
+   * @brief Set dynamic stencil reference value.
+   * @param face_mask Stencil face mask.
+   * @param reference Reference value.
+   */
+  void set_stencil_reference(vk::StencilFaceFlags face_mask, std::uint32_t reference) const;
+
+  /**
+   * @brief Enable or disable primitive restart dynamically.
+   * @param enabled Primitive-restart enable state.
+   */
+  void set_primitive_restart_enable(bool enabled) const;
+
+  /**
+   * @brief Set dynamic line width.
+   * @param line_width Line width.
+   */
+  void set_line_width(float line_width) const;
+
+  /**
+   * @brief Set dynamic blend constants.
+   * @param blend_constants Blend constants RGBA.
+   */
+  void set_blend_constants(const std::array<float, 4> &blend_constants) const;
+
+  /**
+   * @brief Enable or disable dynamic logic-op state.
+   * @param enabled Logic-op enable state.
+   */
+  void set_logic_op_enable(bool enabled) const;
+
+  /**
+   * @brief Set per-attachment color-blend enable state.
+   * @param first_attachment First color attachment index.
+   * @param enables Blend-enable values per attachment.
+   */
+  void set_color_blend_enable(std::uint32_t first_attachment, std::span<const vk::Bool32> enables) const;
+
+  /**
+   * @brief Set per-attachment color-blend equations.
+   * @param first_attachment First color attachment index.
+   * @param equations Blend equations per attachment.
+   */
+  void set_color_blend_equation(std::uint32_t first_attachment, std::span<const vk::ColorBlendEquationEXT> equations) const;
+
+  /**
+   * @brief Set per-attachment color-write masks.
+   * @param first_attachment First color attachment index.
+   * @param masks Color-write masks per attachment.
+   */
+  void set_color_write_mask(std::uint32_t first_attachment, std::span<const vk::ColorComponentFlags> masks) const;
+
+  /**
+   * @brief Set dynamic rasterization sample count.
+   * @param samples Rasterization sample count.
+   */
+  void set_rasterization_samples(vk::SampleCountFlagBits samples) const;
+
+  /**
+   * @brief Set dynamic sample-mask words.
+   * @param samples Active sample count.
+   * @param sample_mask_words Sample-mask words.
+   */
+  void set_sample_mask(vk::SampleCountFlagBits samples, std::span<const vk::SampleMask> sample_mask_words) const;
+
+  /**
+   * @brief Enable or disable alpha-to-coverage dynamically.
+   * @param enabled Alpha-to-coverage enable state.
+   */
+  void set_alpha_to_coverage_enable(bool enabled) const;
+
+  /**
+   * @brief Enable or disable alpha-to-one dynamically.
+   * @param enabled Alpha-to-one enable state.
+   */
+  void set_alpha_to_one_enable(bool enabled) const;
 
   /**
    * @brief Bind vertex buffers.

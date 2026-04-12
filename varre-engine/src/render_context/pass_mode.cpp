@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <ranges>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -158,26 +160,204 @@ void PassCommandEncoder::push_constants(const vk::PipelineLayout layout, const v
   command_buffer_.pushConstants(layout, stage_flags, offset, static_cast<std::uint32_t>(data.size_bytes()), data.data());
 }
 
-void PassCommandEncoder::set_viewports(const std::span<const vk::Viewport> viewports) const { command_buffer_.setViewportWithCount(viewports); }
+void PassCommandEncoder::set_viewports(const std::span<const vk::Viewport> viewports) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_viewports");
+  command_buffer_.setViewportWithCount(viewports);
+}
 
-void PassCommandEncoder::set_scissors(const std::span<const vk::Rect2D> scissors) const { command_buffer_.setScissorWithCount(scissors); }
+void PassCommandEncoder::set_scissors(const std::span<const vk::Rect2D> scissors) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_scissors");
+  command_buffer_.setScissorWithCount(scissors);
+}
 
-void PassCommandEncoder::set_primitive_topology(const vk::PrimitiveTopology topology) const { command_buffer_.setPrimitiveTopology(topology); }
+void PassCommandEncoder::set_primitive_topology(const vk::PrimitiveTopology topology) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_primitive_topology");
+  command_buffer_.setPrimitiveTopology(topology);
+}
 
-void PassCommandEncoder::set_cull_mode(const vk::CullModeFlags cull_mode) const { command_buffer_.setCullMode(cull_mode); }
+void PassCommandEncoder::set_cull_mode(const vk::CullModeFlags cull_mode) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_cull_mode");
+  command_buffer_.setCullMode(cull_mode);
+}
 
-void PassCommandEncoder::set_front_face(const vk::FrontFace front_face) const { command_buffer_.setFrontFace(front_face); }
+void PassCommandEncoder::set_front_face(const vk::FrontFace front_face) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_front_face");
+  command_buffer_.setFrontFace(front_face);
+}
 
-void PassCommandEncoder::set_depth_test_enable(const bool enabled) const { command_buffer_.setDepthTestEnable(enabled); }
+void PassCommandEncoder::set_depth_test_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_test_enable");
+  command_buffer_.setDepthTestEnable(enabled);
+}
 
-void PassCommandEncoder::set_depth_write_enable(const bool enabled) const { command_buffer_.setDepthWriteEnable(enabled); }
+void PassCommandEncoder::set_depth_write_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_write_enable");
+  command_buffer_.setDepthWriteEnable(enabled);
+}
 
-void PassCommandEncoder::set_depth_compare_op(const vk::CompareOp compare_op) const { command_buffer_.setDepthCompareOp(compare_op); }
+void PassCommandEncoder::set_depth_compare_op(const vk::CompareOp compare_op) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_compare_op");
+  command_buffer_.setDepthCompareOp(compare_op);
+}
 
-void PassCommandEncoder::set_rasterizer_discard_enable(const bool enabled) const { command_buffer_.setRasterizerDiscardEnable(enabled); }
+void PassCommandEncoder::set_rasterizer_discard_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_rasterizer_discard_enable");
+  command_buffer_.setRasterizerDiscardEnable(enabled);
+}
+
+void PassCommandEncoder::set_depth_bias_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_bias_enable");
+  command_buffer_.setDepthBiasEnable(enabled);
+}
+
+void PassCommandEncoder::set_depth_bias(const float constant_factor, const float clamp, const float slope_factor) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_bias");
+  command_buffer_.setDepthBias(constant_factor, clamp, slope_factor);
+}
+
+void PassCommandEncoder::set_depth_bounds_test_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_bounds_test_enable");
+  command_buffer_.setDepthBoundsTestEnable(enabled);
+}
+
+void PassCommandEncoder::set_depth_bounds(const float min_depth_bounds, const float max_depth_bounds) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_depth_bounds");
+  if (min_depth_bounds > max_depth_bounds) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_depth_bounds requires min_depth_bounds <= max_depth_bounds.");
+  }
+  command_buffer_.setDepthBounds(min_depth_bounds, max_depth_bounds);
+}
+
+void PassCommandEncoder::set_stencil_test_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_stencil_test_enable");
+  command_buffer_.setStencilTestEnable(enabled);
+}
+
+void PassCommandEncoder::set_stencil_op(const vk::StencilFaceFlags face_mask, const vk::StencilOp fail_op, const vk::StencilOp pass_op,
+                                        const vk::StencilOp depth_fail_op, const vk::CompareOp compare_op) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_stencil_op");
+  if (face_mask == vk::StencilFaceFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_stencil_op requires a non-empty face mask.");
+  }
+  command_buffer_.setStencilOp(face_mask, fail_op, pass_op, depth_fail_op, compare_op);
+}
+
+void PassCommandEncoder::set_stencil_compare_mask(const vk::StencilFaceFlags face_mask, const std::uint32_t compare_mask) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_stencil_compare_mask");
+  if (face_mask == vk::StencilFaceFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_stencil_compare_mask requires a non-empty face mask.");
+  }
+  command_buffer_.setStencilCompareMask(face_mask, compare_mask);
+}
+
+void PassCommandEncoder::set_stencil_write_mask(const vk::StencilFaceFlags face_mask, const std::uint32_t write_mask) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_stencil_write_mask");
+  if (face_mask == vk::StencilFaceFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_stencil_write_mask requires a non-empty face mask.");
+  }
+  command_buffer_.setStencilWriteMask(face_mask, write_mask);
+}
+
+void PassCommandEncoder::set_stencil_reference(const vk::StencilFaceFlags face_mask, const std::uint32_t reference) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_stencil_reference");
+  if (face_mask == vk::StencilFaceFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_stencil_reference requires a non-empty face mask.");
+  }
+  command_buffer_.setStencilReference(face_mask, reference);
+}
+
+void PassCommandEncoder::set_primitive_restart_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_primitive_restart_enable");
+  command_buffer_.setPrimitiveRestartEnable(enabled);
+}
+
+void PassCommandEncoder::set_line_width(const float line_width) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_line_width");
+  if (line_width <= 0.0F) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_line_width requires line_width > 0.");
+  }
+  command_buffer_.setLineWidth(line_width);
+}
+
+void PassCommandEncoder::set_blend_constants(const std::array<float, 4> &blend_constants) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_blend_constants");
+  command_buffer_.setBlendConstants(blend_constants.data());
+}
+
+void PassCommandEncoder::set_logic_op_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_logic_op_enable");
+  command_buffer_.setLogicOpEnableEXT(enabled);
+}
+
+void PassCommandEncoder::set_color_blend_enable(const std::uint32_t first_attachment, const std::span<const vk::Bool32> enables) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_color_blend_enable");
+  if (enables.empty()) {
+    return;
+  }
+  const std::uint64_t attachment_end = static_cast<std::uint64_t>(first_attachment) + static_cast<std::uint64_t>(enables.size());
+  if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_blend_enable attachment range overflows uint32_t.");
+  }
+  command_buffer_.setColorBlendEnableEXT(first_attachment, enables);
+}
+
+void PassCommandEncoder::set_color_blend_equation(const std::uint32_t first_attachment, const std::span<const vk::ColorBlendEquationEXT> equations) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_color_blend_equation");
+  if (equations.empty()) {
+    return;
+  }
+  const std::uint64_t attachment_end = static_cast<std::uint64_t>(first_attachment) + static_cast<std::uint64_t>(equations.size());
+  if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_blend_equation attachment range overflows uint32_t.");
+  }
+  command_buffer_.setColorBlendEquationEXT(first_attachment, equations);
+}
+
+void PassCommandEncoder::set_color_write_mask(const std::uint32_t first_attachment, const std::span<const vk::ColorComponentFlags> masks) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_color_write_mask");
+  if (masks.empty()) {
+    return;
+  }
+  const std::uint64_t attachment_end = static_cast<std::uint64_t>(first_attachment) + static_cast<std::uint64_t>(masks.size());
+  if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_write_mask attachment range overflows uint32_t.");
+  }
+  command_buffer_.setColorWriteMaskEXT(first_attachment, masks);
+}
+
+void PassCommandEncoder::set_rasterization_samples(const vk::SampleCountFlagBits samples) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_rasterization_samples");
+  command_buffer_.setRasterizationSamplesEXT(samples);
+}
+
+void PassCommandEncoder::set_sample_mask(const vk::SampleCountFlagBits samples, const std::span<const vk::SampleMask> sample_mask_words) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_sample_mask");
+  const std::uint32_t sample_count = static_cast<std::uint32_t>(samples);
+  if (sample_count == 0U || (sample_count & (sample_count - 1U)) != 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_sample_mask requires a valid power-of-two sample count.");
+  }
+  const std::uint32_t expected_word_count = (sample_count + 31U) / 32U;
+  if (sample_mask_words.size() != expected_word_count) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("PassCommandEncoder::set_sample_mask expects {} mask word(s) for sample count {}, but received {}.",
+                                        expected_word_count, sample_count, sample_mask_words.size()));
+  }
+  command_buffer_.setSampleMaskEXT(samples, sample_mask_words);
+}
+
+void PassCommandEncoder::set_alpha_to_coverage_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_alpha_to_coverage_enable");
+  command_buffer_.setAlphaToCoverageEnableEXT(enabled);
+}
+
+void PassCommandEncoder::set_alpha_to_one_enable(const bool enabled) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_alpha_to_one_enable");
+  command_buffer_.setAlphaToOneEnableEXT(enabled);
+}
 
 void PassCommandEncoder::bind_vertex_buffers(const std::uint32_t first_binding, const std::span<const vk::Buffer> buffers,
                                              const std::span<const vk::DeviceSize> offsets) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "bind_vertex_buffers");
   if (buffers.size() != offsets.size()) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::bind_vertex_buffers requires equal buffer/offset counts.");
   }
@@ -185,6 +365,7 @@ void PassCommandEncoder::bind_vertex_buffers(const std::uint32_t first_binding, 
 }
 
 void PassCommandEncoder::bind_index_buffer(const vk::Buffer buffer, const vk::DeviceSize offset, const vk::IndexType index_type) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "bind_index_buffer");
   command_buffer_.bindIndexBuffer(buffer, offset, index_type);
 }
 
@@ -367,6 +548,11 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
 
   std::unordered_map<PassResourceId, BufferUsageState> buffer_usage_states;
   std::unordered_map<PassResourceId, ImageUsageState> image_usage_states;
+  enum class ResourceKind : std::uint8_t {
+    kBuffer = 0U,
+    kImage,
+  };
+  std::unordered_map<PassResourceId, ResourceKind> declared_resource_kinds;
 
   const auto resolve_queue_runtime_index = [&](const PassPhaseDesc &phase_desc) -> std::size_t {
     switch (phase_desc.kind) {
@@ -405,6 +591,9 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
 
   for (std::size_t phase_index = 0; phase_index < phases.size(); ++phase_index) {
     const PassPhase &phase = phases[phase_index];
+    if (phase.description.name.empty()) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase at index {} must provide a non-empty diagnostic name.", phase_index));
+    }
     if (!phase.record) {
       throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' does not provide a recording callback.", phase.description.name));
     }
@@ -417,10 +606,27 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                 fmt::format("Graphics phase '{}' has layer_count=0, which is invalid.", phase.description.name));
       }
+      if (phase.description.graphics_rendering->render_area.extent.width == 0U || phase.description.graphics_rendering->render_area.extent.height == 0U) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Graphics phase '{}' has render_area extent {}x{}, but both dimensions must be non-zero.", phase.description.name,
+                                            phase.description.graphics_rendering->render_area.extent.width,
+                                            phase.description.graphics_rendering->render_area.extent.height));
+      }
+      if (phase.description.graphics_rendering->color_attachments.empty() && !phase.description.graphics_rendering->depth_attachment.has_value() &&
+          !phase.description.graphics_rendering->stencil_attachment.has_value()) {
+        throw make_engine_error(
+          EngineErrorCode::kInvalidArgument,
+          fmt::format("Graphics phase '{}' must provide at least one color/depth/stencil attachment for dynamic rendering.", phase.description.name));
+      }
     } else if (phase.description.graphics_rendering.has_value()) {
       throw make_engine_error(EngineErrorCode::kInvalidArgument,
                               fmt::format("Non-graphics phase '{}' cannot provide graphics_rendering metadata.", phase.description.name));
     }
+
+    std::unordered_set<PassResourceId> phase_buffer_resource_ids;
+    phase_buffer_resource_ids.reserve(phase.description.buffer_accesses.size());
+    std::unordered_set<PassResourceId> phase_image_resource_ids;
+    phase_image_resource_ids.reserve(phase.description.image_accesses.size());
 
     resolved_phases[phase_index].phase = &phase;
     resolved_phases[phase_index].queue_runtime_index = resolve_queue_runtime_index(phase.description);
@@ -437,10 +643,45 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     }
 
     for (const PassBufferAccess &buffer_access : phase.description.buffer_accesses) {
+      if (buffer_access.resource_id == 0U) {
+        throw make_engine_error(
+          EngineErrorCode::kInvalidArgument,
+          fmt::format("Phase '{}' contains PassBufferAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase.description.name));
+      }
       if (buffer_access.buffer == VK_NULL_HANDLE) {
         throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                 fmt::format("Phase '{}' contains PassBufferAccess with VK_NULL_HANDLE.", phase.description.name));
       }
+      if (buffer_access.stage_mask == vk::PipelineStageFlags2{}) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with empty stage_mask.",
+                                                                               phase.description.name, buffer_access.resource_id));
+      }
+      if (buffer_access.writes && buffer_access.access_mask == vk::AccessFlags2{}) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' contains writable PassBufferAccess for resource id {} with empty access_mask.", phase.description.name,
+                                            buffer_access.resource_id));
+      }
+      if (buffer_access.size == 0U) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with size=0.",
+                                                                               phase.description.name, buffer_access.resource_id));
+      }
+      if (buffer_access.size != VK_WHOLE_SIZE && buffer_access.offset > (std::numeric_limits<vk::DeviceSize>::max() - buffer_access.size)) {
+        throw make_engine_error(
+          EngineErrorCode::kInvalidArgument,
+          fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with offset+size overflow.", phase.description.name, buffer_access.resource_id));
+      }
+      if (!phase_buffer_resource_ids.insert(buffer_access.resource_id).second) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' declares duplicate PassBufferAccess resource id {} within the same phase.", phase.description.name,
+                                            buffer_access.resource_id));
+      }
+      const auto [resource_kind_it, inserted_kind] = declared_resource_kinds.try_emplace(buffer_access.resource_id, ResourceKind::kBuffer);
+      if (!inserted_kind && resource_kind_it->second != ResourceKind::kBuffer) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
+                                            phase.description.name, buffer_access.resource_id));
+      }
+
       const auto state_it = buffer_usage_states.find(buffer_access.resource_id);
       if (state_it != buffer_usage_states.end()) {
         const BufferUsageState &previous_state = state_it->second;
@@ -504,10 +745,49 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     }
 
     for (const PassImageAccess &image_access : phase.description.image_accesses) {
+      if (image_access.resource_id == 0U) {
+        throw make_engine_error(
+          EngineErrorCode::kInvalidArgument,
+          fmt::format("Phase '{}' contains PassImageAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase.description.name));
+      }
       if (image_access.image == VK_NULL_HANDLE) {
         throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                 fmt::format("Phase '{}' contains PassImageAccess with VK_NULL_HANDLE.", phase.description.name));
       }
+      if (image_access.stage_mask == vk::PipelineStageFlags2{}) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty stage_mask.",
+                                                                               phase.description.name, image_access.resource_id));
+      }
+      if (image_access.writes && image_access.access_mask == vk::AccessFlags2{}) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' contains writable PassImageAccess for resource id {} with empty access_mask.", phase.description.name,
+                                            image_access.resource_id));
+      }
+      if (image_access.layout == vk::ImageLayout::eUndefined) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with eUndefined layout.",
+                                                                               phase.description.name, image_access.resource_id));
+      }
+      if (image_access.subresource_range.aspectMask == vk::ImageAspectFlags{}) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty aspectMask.",
+                                                                               phase.description.name, image_access.resource_id));
+      }
+      if (image_access.subresource_range.levelCount == 0U || image_access.subresource_range.layerCount == 0U) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' contains PassImageAccess for resource id {} with zero levelCount/layerCount.", phase.description.name,
+                                            image_access.resource_id));
+      }
+      if (!phase_image_resource_ids.insert(image_access.resource_id).second) {
+        throw make_engine_error(
+          EngineErrorCode::kInvalidArgument,
+          fmt::format("Phase '{}' declares duplicate PassImageAccess resource id {} within the same phase.", phase.description.name, image_access.resource_id));
+      }
+      const auto [resource_kind_it, inserted_kind] = declared_resource_kinds.try_emplace(image_access.resource_id, ResourceKind::kImage);
+      if (!inserted_kind && resource_kind_it->second != ResourceKind::kImage) {
+        throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
+                                            phase.description.name, image_access.resource_id));
+      }
+
       const auto state_it = image_usage_states.find(image_access.resource_id);
       if (state_it != image_usage_states.end()) {
         const ImageUsageState &previous_state = state_it->second;
@@ -586,11 +866,17 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     if (wait.semaphore == VK_NULL_HANDLE) {
       throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain VK_NULL_HANDLE semaphore.");
     }
+    if (wait.stage_mask == vk::PipelineStageFlags2{}) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain empty stage_mask.");
+    }
   }
   for (const PassExternalSignal &signal : execution_info.signals) {
     detail::validate_phase_id(signal.phase_id, phases.size(), "PassExecutionInfo.signals");
     if (signal.semaphore == VK_NULL_HANDLE) {
       throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain VK_NULL_HANDLE semaphore.");
+    }
+    if (signal.stage_mask == vk::PipelineStageFlags2{}) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain empty stage_mask.");
     }
   }
 
@@ -627,6 +913,31 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains color attachment with VK_NULL_HANDLE image_view.", phase.description.name));
         }
+        if (color_attachment.image_layout == vk::ImageLayout::eUndefined) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' contains color attachment with eUndefined image_layout.", phase.description.name));
+        }
+        if (color_attachment.load_op == vk::AttachmentLoadOp::eClear && !color_attachment.clear_value.has_value()) {
+          throw make_engine_error(
+            EngineErrorCode::kInvalidArgument,
+            fmt::format("Graphics phase '{}' color attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
+        }
+        if (color_attachment.load_op != vk::AttachmentLoadOp::eClear && color_attachment.clear_value.has_value()) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' color attachment provides clear_value but load_op is not eClear.", phase.description.name));
+        }
+        const bool has_resolve_view = color_attachment.resolve_image_view != VK_NULL_HANDLE;
+        const bool has_resolve_mode = color_attachment.resolve_mode != vk::ResolveModeFlagBits::eNone;
+        if (has_resolve_view != has_resolve_mode) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' color attachment resolve_image_view/resolve_mode must either both be set or both be unset.",
+                                              phase.description.name));
+        }
+        if (has_resolve_view && color_attachment.resolve_image_layout == vk::ImageLayout::eUndefined) {
+          throw make_engine_error(
+            EngineErrorCode::kInvalidArgument,
+            fmt::format("Graphics phase '{}' color attachment resolve target uses eUndefined resolve_image_layout.", phase.description.name));
+        }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(color_attachment.image_view)
                                                         .setImageLayout(color_attachment.image_layout)
@@ -648,6 +959,19 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains depth attachment with VK_NULL_HANDLE image_view.", phase.description.name));
         }
+        if (depth_attachment.image_layout == vk::ImageLayout::eUndefined) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' contains depth attachment with eUndefined image_layout.", phase.description.name));
+        }
+        if (depth_attachment.load_op == vk::AttachmentLoadOp::eClear && !depth_attachment.clear_value.has_value()) {
+          throw make_engine_error(
+            EngineErrorCode::kInvalidArgument,
+            fmt::format("Graphics phase '{}' depth attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
+        }
+        if (depth_attachment.load_op != vk::AttachmentLoadOp::eClear && depth_attachment.clear_value.has_value()) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' depth attachment provides clear_value but load_op is not eClear.", phase.description.name));
+        }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(depth_attachment.image_view)
                                                         .setImageLayout(depth_attachment.image_layout)
@@ -665,6 +989,20 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         if (stencil_attachment.image_view == VK_NULL_HANDLE) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains stencil attachment with VK_NULL_HANDLE image_view.", phase.description.name));
+        }
+        if (stencil_attachment.image_layout == vk::ImageLayout::eUndefined) {
+          throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                                  fmt::format("Graphics phase '{}' contains stencil attachment with eUndefined image_layout.", phase.description.name));
+        }
+        if (stencil_attachment.load_op == vk::AttachmentLoadOp::eClear && !stencil_attachment.clear_value.has_value()) {
+          throw make_engine_error(
+            EngineErrorCode::kInvalidArgument,
+            fmt::format("Graphics phase '{}' stencil attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
+        }
+        if (stencil_attachment.load_op != vk::AttachmentLoadOp::eClear && stencil_attachment.clear_value.has_value()) {
+          throw make_engine_error(
+            EngineErrorCode::kInvalidArgument,
+            fmt::format("Graphics phase '{}' stencil attachment provides clear_value but load_op is not eClear.", phase.description.name));
         }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(stencil_attachment.image_view)
