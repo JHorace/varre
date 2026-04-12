@@ -1,6 +1,7 @@
 target_sources(
   varre_engine
   PRIVATE
+    pass_frame_loop.cpp
     pass_mode.cpp
 )
 

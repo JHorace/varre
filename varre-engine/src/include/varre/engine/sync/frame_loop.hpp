@@ -187,6 +187,18 @@ public:
   void submit_graphics(vk::CommandBuffer command_buffer, vk::PipelineStageFlags wait_stage_mask = vk::PipelineStageFlagBits::eColorAttachmentOutput);
 
   /**
+   * @brief Mark the current frame as submitted by an external submission path.
+   *
+   * This is used when command submission is executed outside `FrameLoop`
+   * (for example by pass-mode orchestration), while still using `FrameLoop`
+   * for acquire/present state management.
+   *
+   * @param render_finished_signaled Whether external submission signaled this frame's `render_finished` semaphore.
+   * @throws EngineError when called before acquire.
+   */
+  void notify_external_submit(bool render_finished_signaled = true);
+
+  /**
    * @brief Present one swapchain image for the current frame.
    * @param swapchain Active swapchain context.
    * @param request Presentation request including image index and wait semaphores.

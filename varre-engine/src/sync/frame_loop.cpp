@@ -136,8 +136,7 @@ AcquiredFrame FrameLoop::acquire_next_image(const SwapchainContext &swapchain, c
     const vk::ResultValue<std::uint32_t> acquire_result = swapchain.swapchain().acquireNextImage(timeout_ns, *frame.image_available, vk::Fence{});
     result.image_index = acquire_result.value;
     if (result.image_index >= image_in_flight_fences_.size()) {
-      throw make_engine_error(EngineErrorCode::kInvalidState,
-                              "Swapchain acquire returned an out-of-range image index after resize/recreate.");
+      throw make_engine_error(EngineErrorCode::kInvalidState, "Swapchain acquire returned an out-of-range image index after resize/recreate.");
     }
     if (acquire_result.result == vk::Result::eSuboptimalKHR) {
       result.status = FrameAcquireStatus::kSuboptimal;
@@ -223,6 +222,14 @@ void FrameLoop::submit_graphics(const vk::CommandBuffer command_buffer, const vk
   submit_graphics_batch(batch);
 }
 
+void FrameLoop::notify_external_submit(const bool render_finished_signaled) {
+  if (!frame_acquired_) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "notify_external_submit called before acquire_next_image.");
+  }
+  frame_submitted_ = true;
+  render_finished_signaled_ = render_finished_signaled;
+}
+
 PresentedFrame FrameLoop::present(const SwapchainContext &swapchain, const FramePresentRequest &request) {
   if (!frame_acquired_) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "present called before acquire_next_image.");
@@ -302,9 +309,7 @@ void FrameLoop::recreate_swapchain(SwapchainContext *swapchain, const SwapchainC
   static_cast<void>(try_recreate_swapchain(swapchain, recreate_info));
 }
 
-void FrameLoop::recreate_swapchain(SwapchainContext *swapchain) {
-  static_cast<void>(try_recreate_swapchain(swapchain));
-}
+void FrameLoop::recreate_swapchain(SwapchainContext *swapchain) { static_cast<void>(try_recreate_swapchain(swapchain)); }
 
 bool FrameLoop::try_recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info) {
   if (swapchain == nullptr) {
