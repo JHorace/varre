@@ -13,5 +13,6 @@ target_include_directories(
 add_subdirectory(core)
 add_subdirectory(sync)
 add_subdirectory(descriptors)
+add_subdirectory(assets)
 add_subdirectory(geometry)
 add_subdirectory(render_context)
