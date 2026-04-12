@@ -34,20 +34,13 @@ namespace detail {
  * @param profile Resolved engine device profile.
  */
 void validate_pass_mode_device_profile(const DeviceProfile &profile) {
+  if (profile.api_version < VK_API_VERSION_1_3) {
+    throw make_engine_error(EngineErrorCode::kMissingRequirement, "PassExecutor requires Vulkan API version 1.3 or newer.");
+  }
+
   if (!has_enabled_extension(profile, VK_EXT_SHADER_OBJECT_EXTENSION_NAME)) {
     throw make_engine_error(EngineErrorCode::kMissingRequirement,
                             fmt::format("PassExecutor requires '{}' to be enabled on EngineContext device creation.", VK_EXT_SHADER_OBJECT_EXTENSION_NAME));
-  }
-
-  const bool has_dynamic_rendering = profile.api_version >= VK_API_VERSION_1_3 || has_enabled_extension(profile, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-  if (!has_dynamic_rendering) {
-    throw make_engine_error(EngineErrorCode::kMissingRequirement,
-                            "PassExecutor requires Vulkan 1.3 dynamic rendering support (core 1.3 or VK_KHR_dynamic_rendering).");
-  }
-
-  const bool has_synchronization2 = profile.api_version >= VK_API_VERSION_1_3 || has_enabled_extension(profile, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-  if (!has_synchronization2) {
-    throw make_engine_error(EngineErrorCode::kMissingRequirement, "PassExecutor requires synchronization2 support (core 1.3 or VK_KHR_synchronization2).");
   }
 }
 

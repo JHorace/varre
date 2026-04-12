@@ -90,7 +90,7 @@ struct EngineInitInfo {
   std::uint32_t application_version = VK_MAKE_API_VERSION(0, 0, 1, 0);
   /** @brief Engine version passed to Vulkan instance creation. */
   std::uint32_t engine_version = VK_MAKE_API_VERSION(0, 0, 1, 0);
-  /** @brief Vulkan API version requested for instance creation. */
+  /** @brief Vulkan API version requested for instance creation (must be >= 1.3). */
   std::uint32_t api_version = VK_API_VERSION_1_3;
   /** @brief Enable Vulkan validation layers and debug messenger. */
   bool enable_validation = false;
@@ -100,18 +100,6 @@ struct EngineInitInfo {
   bool require_async_compute = false;
   /** @brief Require a dedicated transfer queue family. */
   bool require_dedicated_transfer = false;
-  /**
-   * @brief Enable Pass Mode device requirements by default.
-   *
-   * When enabled, engine initialization requires and enables:
-   * - `VK_EXT_shader_object`
-   * - dynamic rendering
-   * - synchronization2
-   *
-   * For Vulkan API version < 1.3, dynamic rendering and synchronization2 are
-   * required through their KHR extension names.
-   */
-  bool enable_pass_mode = true;
   /** @brief Required Vulkan instance extension names. */
   std::vector<std::string> required_instance_extensions;
   /** @brief Required Vulkan instance layer names. */

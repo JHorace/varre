@@ -18,56 +18,26 @@ namespace varre::engine::detail {
 
 namespace {
 /**
- * @brief Required pass-mode feature toggles.
- */
-struct PassModeFeatureRequirements {
-  bool dynamic_rendering = false;
-  bool synchronization2 = false;
-  bool shader_object = false;
-};
-
-/**
- * @brief Build pass-mode feature requirements from initialization options.
- * @param info Engine initialization options.
- * @return Required pass-mode feature toggles.
- */
-[[nodiscard]] PassModeFeatureRequirements build_pass_mode_feature_requirements(const EngineInitInfo &info) {
-  if (!info.enable_pass_mode) {
-    return PassModeFeatureRequirements{};
-  }
-  return PassModeFeatureRequirements{
-    .dynamic_rendering = true,
-    .synchronization2 = true,
-    .shader_object = true,
-  };
-}
-
-/**
  * @brief Validate required pass-mode features on one physical device.
  * @param physical_device Physical device candidate.
- * @param requirements Required pass-mode features.
  * @param missing_features Human-readable missing feature names.
  * @return `true` when all required features are supported.
  */
-[[nodiscard]] bool supports_pass_mode_feature_requirements(const vk::raii::PhysicalDevice &physical_device, const PassModeFeatureRequirements &requirements,
-                                                           std::vector<std::string> *missing_features) {
+[[nodiscard]] bool supports_pass_mode_features(const vk::raii::PhysicalDevice &physical_device, std::vector<std::string> *missing_features) {
   missing_features->clear();
-  if (!requirements.dynamic_rendering && !requirements.synchronization2 && !requirements.shader_object) {
-    return true;
-  }
 
   const auto feature_chain =
     physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceShaderObjectFeaturesEXT>();
   const vk::PhysicalDeviceVulkan13Features &vulkan_13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
   const vk::PhysicalDeviceShaderObjectFeaturesEXT &shader_object_features = feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
 
-  if (requirements.dynamic_rendering && !vulkan_13_features.dynamicRendering) {
+  if (!vulkan_13_features.dynamicRendering) {
     missing_features->push_back("dynamicRendering");
   }
-  if (requirements.synchronization2 && !vulkan_13_features.synchronization2) {
+  if (!vulkan_13_features.synchronization2) {
     missing_features->push_back("synchronization2");
   }
-  if (requirements.shader_object && !shader_object_features.shaderObject) {
+  if (!shader_object_features.shaderObject) {
     missing_features->push_back("shaderObject");
   }
   return missing_features->empty();
@@ -140,13 +110,7 @@ DeviceProfileRequest build_device_profile_request(const EngineInitInfo &info) {
   for (const std::string &extension : info.required_device_extensions) {
     append_unique(&request.required_extensions, extension);
   }
-  if (info.enable_pass_mode) {
-    append_unique(&request.required_extensions, VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
-    if (info.api_version < VK_API_VERSION_1_3) {
-      append_unique(&request.required_extensions, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-      append_unique(&request.required_extensions, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-    }
-  }
+  append_unique(&request.required_extensions, VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
   return request;
 }
 
@@ -257,7 +221,6 @@ DeviceSelection select_physical_device(const vk::raii::PhysicalDevices &physical
 
   std::optional<Candidate> best;
   std::vector<std::string> rejection_reasons;
-  const PassModeFeatureRequirements pass_mode_feature_requirements = build_pass_mode_feature_requirements(info);
 
   for (std::size_t index = 0; index < physical_devices.size(); ++index) {
     const vk::raii::PhysicalDevice &physical_device = physical_devices[index];
@@ -276,7 +239,7 @@ DeviceSelection select_physical_device(const vk::raii::PhysicalDevices &physical
     }
 
     std::vector<std::string> missing_pass_mode_features;
-    if (!supports_pass_mode_feature_requirements(physical_device, pass_mode_feature_requirements, &missing_pass_mode_features)) {
+    if (!supports_pass_mode_features(physical_device, &missing_pass_mode_features)) {
       rejection_reasons.push_back(fmt::format("device[{}]: missing required pass-mode feature(s): {}", index, fmt::join(missing_pass_mode_features, ", ")));
       continue;
     }

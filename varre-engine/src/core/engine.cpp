@@ -21,6 +21,10 @@ EngineContext::EngineContext(vk::raii::Context &&context, vk::raii::Instance &&i
       device_profile_(std::move(device_profile)) {}
 
 EngineContext EngineContext::create(const EngineInitInfo &info) {
+  if (info.api_version < VK_API_VERSION_1_3) {
+    throw make_engine_error(EngineErrorCode::kMissingRequirement, "EngineContext requires Vulkan API version 1.3 or newer.");
+  }
+
   vk::raii::Context context;
 
   std::vector<std::string> required_layers = info.required_instance_layers;
@@ -83,12 +87,10 @@ EngineContext EngineContext::create(const EngineInitInfo &info) {
   std::optional<vk::PhysicalDeviceFeatures2> device_features2;
   std::optional<vk::PhysicalDeviceVulkan13Features> vulkan_13_features;
   std::optional<vk::PhysicalDeviceShaderObjectFeaturesEXT> shader_object_features;
-  if (info.enable_pass_mode) {
-    shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT{}.setShaderObject(VK_TRUE);
-    vulkan_13_features = vk::PhysicalDeviceVulkan13Features{}.setPNext(&(*shader_object_features)).setDynamicRendering(VK_TRUE).setSynchronization2(VK_TRUE);
-    device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_13_features));
-    device_create_info = device_create_info.setPNext(&(*device_features2));
-  }
+  shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT{}.setShaderObject(VK_TRUE);
+  vulkan_13_features = vk::PhysicalDeviceVulkan13Features{}.setPNext(&(*shader_object_features)).setDynamicRendering(VK_TRUE).setSynchronization2(VK_TRUE);
+  device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_13_features));
+  device_create_info = device_create_info.setPNext(&(*device_features2));
 
   vk::raii::Device device(physical_device, device_create_info);
 
