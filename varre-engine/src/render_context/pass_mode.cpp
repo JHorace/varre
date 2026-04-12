@@ -911,6 +911,19 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                       .setImage(image_access.image)
                                                                       .setSubresourceRange(image_access.subresource_range));
         }
+      } else {
+        // First usage in this execution: initialize layout from eUndefined.
+        resolved_phases[phase_index].pre_image_barriers.push_back(vk::ImageMemoryBarrier2{}
+                                                                    .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
+                                                                    .setSrcAccessMask(vk::AccessFlagBits2::eNone)
+                                                                    .setDstStageMask(image_access.stage_mask)
+                                                                    .setDstAccessMask(image_access.access_mask)
+                                                                    .setOldLayout(vk::ImageLayout::eUndefined)
+                                                                    .setNewLayout(image_access_layout)
+                                                                    .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+                                                                    .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+                                                                    .setImage(image_access.image)
+                                                                    .setSubresourceRange(image_access.subresource_range));
       }
 
       image_usage_states[image_access.resource_id] = ImageUsageState{
