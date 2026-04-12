@@ -11,6 +11,8 @@
 
 #include <vulkan/vulkan_raii.hpp>
 
+#include "varre/engine/errors.hpp"
+
 namespace varre::engine {
 
 class EngineContext;
@@ -79,7 +81,7 @@ public:
    * @param surface Platform-owned surface context.
    * @param info Swapchain configuration.
    * @return Initialized swapchain context.
-   * @throws std::runtime_error on capability or creation failures.
+   * @throws EngineError on capability or creation failures.
    */
   [[nodiscard]] static SwapchainContext create(const EngineContext &engine, const SurfaceContext &surface, const SwapchainCreateInfo &info = {});
 
@@ -87,12 +89,14 @@ public:
    * @brief Recreate the swapchain for the same engine/surface pair.
    * @param info Requested swapchain preferences for the recreated object.
    * @return Recreated swapchain context.
+   * @throws EngineError when recreation preconditions are not met or creation fails.
    */
   [[nodiscard]] SwapchainContext recreate(const SwapchainCreateInfo &info) const;
 
   /**
    * @brief Recreate the swapchain using the previous creation preferences.
    * @return Recreated swapchain context.
+   * @throws EngineError when recreation preconditions are not met or creation fails.
    */
   [[nodiscard]] SwapchainContext recreate() const;
 
@@ -199,31 +203,16 @@ private:
    * @param old_swapchain Previous swapchain handle for Vulkan recreation path.
    * @return Newly created swapchain context.
    */
-  [[nodiscard]] static SwapchainContext create_internal(
-      const EngineContext &engine,
-      const SurfaceContext &surface_context,
-      const SwapchainCreateInfo &info,
-      vk::SwapchainKHR old_swapchain
-  );
+  [[nodiscard]] static SwapchainContext create_internal(const EngineContext &engine, const SurfaceContext &surface_context, const SwapchainCreateInfo &info,
+                                                        vk::SwapchainKHR old_swapchain);
 
   /**
    * @brief Internal constructor from fully initialized objects.
    */
-  SwapchainContext(
-      const EngineContext *engine,
-      const SurfaceContext *surface_context,
-      vk::SurfaceKHR surface,
-      vk::raii::SwapchainKHR &&swapchain,
-      std::vector<vk::Image> &&images,
-      std::vector<vk::raii::ImageView> &&image_views,
-      vk::Format image_format,
-      vk::ColorSpaceKHR color_space,
-      vk::Extent2D extent,
-      vk::PresentModeKHR present_mode,
-      std::uint32_t max_frames_in_flight,
-      SurfaceQueueTopology queue_topology,
-      SwapchainCreateInfo create_info
-  );
+  SwapchainContext(const EngineContext *engine, const SurfaceContext *surface_context, vk::SurfaceKHR surface, vk::raii::SwapchainKHR &&swapchain,
+                   std::vector<vk::Image> &&images, std::vector<vk::raii::ImageView> &&image_views, vk::Format image_format, vk::ColorSpaceKHR color_space,
+                   vk::Extent2D extent, vk::PresentModeKHR present_mode, std::uint32_t max_frames_in_flight, SurfaceQueueTopology queue_topology,
+                   SwapchainCreateInfo create_info);
 
   const EngineContext *engine_ = nullptr;
   const SurfaceContext *surface_context_ = nullptr;

@@ -7,9 +7,12 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <vector>
 
 #include <vulkan/vulkan_raii.hpp>
+
+#include "varre/engine/errors.hpp"
 
 namespace varre::engine {
 
@@ -47,6 +50,8 @@ enum class FrameAcquireStatus {
 struct AcquiredFrame {
   /** @brief Acquisition status. */
   FrameAcquireStatus status = FrameAcquireStatus::kSuccess;
+  /** @brief Structured error code for non-success statuses. */
+  std::optional<EngineErrorCode> error_code;
   /** @brief Frame slot index used for synchronization. */
   std::uint32_t frame_index = 0U;
   /** @brief Swapchain image index to render into when acquisition succeeded. */
@@ -94,6 +99,16 @@ enum class FramePresentStatus {
 };
 
 /**
+ * @brief Result of presenting a swapchain image.
+ */
+struct PresentedFrame {
+  /** @brief Presentation status. */
+  FramePresentStatus status = FramePresentStatus::kSuccess;
+  /** @brief Structured error code for non-success statuses. */
+  std::optional<EngineErrorCode> error_code;
+};
+
+/**
  * @brief Presentation request with optional custom wait semaphores.
  */
 struct FramePresentRequest {
@@ -128,7 +143,7 @@ public:
    * @param swapchain Swapchain context this loop operates on.
    * @param info Optional creation overrides.
    * @return Initialized frame loop.
-   * @throws std::runtime_error on Vulkan allocation failures.
+   * @throws std::exception on Vulkan allocation failures.
    */
   [[nodiscard]] static FrameLoop create(const EngineContext &engine, const SwapchainContext &swapchain, const FrameLoopCreateInfo &info = {});
 
@@ -153,15 +168,14 @@ public:
    * @param swapchain Active swapchain context.
    * @param timeout_ns Fence/acquire timeout in nanoseconds.
    * @return Acquisition metadata and status.
+   * @throws EngineError on invalid state, invalid arguments, timeout, or unexpected Vulkan failures.
    */
-  [[nodiscard]] AcquiredFrame acquire_next_image(
-      const SwapchainContext &swapchain,
-      std::uint64_t timeout_ns = std::numeric_limits<std::uint64_t>::max()
-  );
+  [[nodiscard]] AcquiredFrame acquire_next_image(const SwapchainContext &swapchain, std::uint64_t timeout_ns = std::numeric_limits<std::uint64_t>::max());
 
   /**
    * @brief Submit a graphics workload batch for the current frame.
    * @param batch Submit batch description.
+   * @throws EngineError when called in an invalid frame-loop state.
    */
   void submit_graphics_batch(const GraphicsSubmitBatch &batch);
 
@@ -176,17 +190,19 @@ public:
    * @brief Present one swapchain image for the current frame.
    * @param swapchain Active swapchain context.
    * @param image_index Image index returned by @ref acquire_next_image.
-   * @return Presentation status.
+   * @return Presentation result and optional structured recoverable error code.
+   * @throws EngineError on invalid state, invalid arguments, or unexpected Vulkan failures.
    */
-  [[nodiscard]] FramePresentStatus present(const SwapchainContext &swapchain, const FramePresentRequest &request);
+  [[nodiscard]] PresentedFrame present(const SwapchainContext &swapchain, const FramePresentRequest &request);
 
   /**
    * @brief Present one swapchain image for the current frame using default waits.
    * @param swapchain Active swapchain context.
    * @param image_index Image index returned by @ref acquire_next_image.
-   * @return Presentation status.
+   * @return Presentation result and optional structured recoverable error code.
+   * @throws EngineError on invalid state, invalid arguments, or unexpected Vulkan failures.
    */
-  [[nodiscard]] FramePresentStatus present(const SwapchainContext &swapchain, std::uint32_t image_index);
+  [[nodiscard]] PresentedFrame present(const SwapchainContext &swapchain, std::uint32_t image_index);
 
   /**
    * @brief Whether swapchain recreation is currently required.
@@ -209,12 +225,14 @@ public:
    * @brief Recreate and rebind the swapchain in one step.
    * @param swapchain Swapchain instance to recreate in place.
    * @param recreate_info Creation preferences for the new swapchain.
+   * @throws EngineError when @p swapchain is null.
    */
   void recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info);
 
   /**
    * @brief Recreate and rebind the swapchain using prior creation preferences.
    * @param swapchain Swapchain instance to recreate in place.
+   * @throws EngineError when @p swapchain is null.
    */
   void recreate_swapchain(SwapchainContext *swapchain);
 
@@ -263,13 +281,8 @@ private:
   /**
    * @brief Internal constructor from pre-built synchronization resources.
    */
-  FrameLoop(
-      const vk::raii::Device *device,
-      vk::Queue graphics_queue,
-      vk::Queue present_queue,
-      std::vector<FrameSyncPrimitives> &&frames,
-      std::vector<vk::Fence> &&image_in_flight_fences
-  );
+  FrameLoop(const vk::raii::Device *device, vk::Queue graphics_queue, vk::Queue present_queue, std::vector<FrameSyncPrimitives> &&frames,
+            std::vector<vk::Fence> &&image_in_flight_fences);
 
   const vk::raii::Device *device_ = nullptr;
   vk::Queue graphics_queue_ = VK_NULL_HANDLE;

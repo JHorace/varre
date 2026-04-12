@@ -11,6 +11,8 @@
 
 #include <vulkan/vulkan_raii.hpp>
 
+#include "varre/engine/errors.hpp"
+
 namespace varre::engine {
 
 /**
@@ -116,7 +118,7 @@ public:
    * @brief Create a fully initialized Vulkan core context.
    * @param info Initialization configuration.
    * @return Initialized engine context.
-   * @throws std::runtime_error on initialization failure.
+   * @throws EngineError on initialization failure.
    */
   [[nodiscard]] static EngineContext create(const EngineInitInfo &info = {});
 
@@ -214,8 +216,8 @@ private:
    */
   EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
                 vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices, vk::Queue graphics_queue,
-                std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue, bool validation_enabled,
-                QueueTopology queue_topology, DeviceProfile device_profile);
+                std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue, bool validation_enabled, QueueTopology queue_topology,
+                DeviceProfile device_profile);
 
   vk::raii::Context context_;
   vk::raii::Instance instance_{nullptr};

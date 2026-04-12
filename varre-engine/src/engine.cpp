@@ -5,9 +5,9 @@
 #include "varre/engine/engine.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <ranges>
 #include <set>
-#include <stdexcept>
 #include <string_view>
 #include <tuple>
 #include <unordered_set>
@@ -19,533 +19,525 @@
 #include <spdlog/spdlog.h>
 
 namespace varre::engine {
-  namespace {
-    /**
-     * @brief Default validation-layer name used when validation is enabled.
-     */
-    constexpr std::string_view kValidationLayerName = "VK_LAYER_KHRONOS_validation";
+namespace {
+/**
+ * @brief Default validation-layer name used when validation is enabled.
+ */
+constexpr std::string_view kValidationLayerName = "VK_LAYER_KHRONOS_validation";
 
-    /**
-     * @brief Information about selected queue families and queue topology quality.
-     */
-    struct QueueSelection {
-      QueueFamilyIndices indices;
-      bool has_dedicated_async_compute = false;
-      bool has_dedicated_transfer = false;
-    };
+/**
+ * @brief Information about selected queue families and queue topology quality.
+ */
+struct QueueSelection {
+  QueueFamilyIndices indices;
+  bool has_dedicated_async_compute = false;
+  bool has_dedicated_transfer = false;
+};
 
-    /**
-     * @brief Selected physical-device outcome, including negotiated profile.
-     */
-    struct DeviceSelection {
-      std::size_t index = 0U;
-      QueueSelection queues{};
-      std::vector<std::string> enabled_extensions;
-      std::vector<std::string> missing_optional_extensions;
-    };
+/**
+ * @brief Selected physical-device outcome, including negotiated profile.
+ */
+struct DeviceSelection {
+  std::size_t index = 0U;
+  QueueSelection queues{};
+  std::vector<std::string> enabled_extensions;
+  std::vector<std::string> missing_optional_extensions;
+};
 
-    /**
-     * @brief Add a name to a vector only when absent.
-     * @param names Destination name list.
-     * @param name Name to add.
-     */
-    void append_unique(std::vector<std::string> *names, const std::string_view name) {
-      const auto exists = std::ranges::any_of(*names, [&](const std::string &existing) { return existing == name; });
-      if (!exists) {
-        names->emplace_back(name);
-      }
+/**
+ * @brief Add a name to a vector only when absent.
+ * @param names Destination name list.
+ * @param name Name to add.
+ */
+void append_unique(std::vector<std::string> *names, const std::string_view name) {
+  const auto exists = std::ranges::any_of(*names, [&](const std::string &existing) { return existing == name; });
+  if (!exists) {
+    names->emplace_back(name);
+  }
+}
+
+/**
+ * @brief Convert string storage into stable C string pointers.
+ * @param names String storage owning target data.
+ * @return Pointer array referencing strings in @p names.
+ */
+std::vector<const char *> to_c_string_ptrs(const std::vector<std::string> &names) {
+  std::vector<const char *> out;
+  out.reserve(names.size());
+  for (const std::string &name : names) {
+    out.push_back(name.c_str());
+  }
+  return out;
+}
+
+/**
+ * @brief Enumerate Vulkan instance extension names.
+ * @param context Vulkan RAII context.
+ * @return Available extension names.
+ */
+std::vector<std::string> enumerate_instance_extension_names(const vk::raii::Context &context) {
+  const std::vector<vk::ExtensionProperties> properties = context.enumerateInstanceExtensionProperties();
+  std::vector<std::string> names;
+  names.reserve(properties.size());
+  for (const vk::ExtensionProperties &property : properties) {
+    names.emplace_back(property.extensionName);
+  }
+  return names;
+}
+
+/**
+ * @brief Enumerate Vulkan instance layer names.
+ * @param context Vulkan RAII context.
+ * @return Available layer names.
+ */
+std::vector<std::string> enumerate_instance_layer_names(const vk::raii::Context &context) {
+  const std::vector<vk::LayerProperties> properties = context.enumerateInstanceLayerProperties();
+  std::vector<std::string> names;
+  names.reserve(properties.size());
+  for (const vk::LayerProperties &property : properties) {
+    names.emplace_back(property.layerName);
+  }
+  return names;
+}
+
+/**
+ * @brief Enumerate Vulkan device extension names for one physical device.
+ * @param physical_device Physical device to query.
+ * @return Available device-extension names.
+ */
+std::vector<std::string> enumerate_device_extension_names(const vk::raii::PhysicalDevice &physical_device) {
+  const std::vector<vk::ExtensionProperties> properties = physical_device.enumerateDeviceExtensionProperties();
+  std::vector<std::string> names;
+  names.reserve(properties.size());
+  for (const vk::ExtensionProperties &property : properties) {
+    names.emplace_back(property.extensionName);
+  }
+  return names;
+}
+
+/**
+ * @brief Validate that all required names are present in available names.
+ * @param available Available names.
+ * @param required Required names.
+ * @param category Category used in diagnostics (e.g. "instance extension").
+ */
+void validate_required_names(const std::vector<std::string> &available, const std::vector<std::string> &required, const std::string_view category) {
+  std::unordered_set<std::string> available_set(available.begin(), available.end());
+  std::vector<std::string> missing;
+  missing.reserve(required.size());
+  for (const std::string &name : required) {
+    if (!available_set.contains(name)) {
+      missing.push_back(name);
+    }
+  }
+
+  if (!missing.empty()) {
+    throw make_engine_error(EngineErrorCode::kMissingRequirement, fmt::format("Missing required {}(s): {}", category, fmt::join(missing, ", ")));
+  }
+}
+
+/**
+ * @brief Merge legacy and profile-based device-extension requests.
+ * @param info Engine initialization input.
+ * @return Consolidated device profile request.
+ */
+DeviceProfileRequest build_device_profile_request(const EngineInitInfo &info) {
+  DeviceProfileRequest request = info.device_profile;
+  for (const std::string &extension : info.required_device_extensions) {
+    append_unique(&request.required_extensions, extension);
+  }
+  return request;
+}
+
+/**
+ * @brief Resolve enabled device extensions from available and requested sets.
+ * @param available Available device extension names.
+ * @param request Device profile request.
+ * @return Enabled extensions and missing optional extensions.
+ */
+std::pair<std::vector<std::string>, std::vector<std::string>> resolve_device_extensions(const std::vector<std::string> &available,
+                                                                                        const DeviceProfileRequest &request) {
+  validate_required_names(available, request.required_extensions, "device extension");
+
+  std::unordered_set<std::string> available_set(available.begin(), available.end());
+  std::vector<std::string> enabled_extensions;
+  enabled_extensions.reserve(request.required_extensions.size() + request.optional_extensions.size());
+  for (const std::string &name : request.required_extensions) {
+    append_unique(&enabled_extensions, name);
+  }
+
+  std::vector<std::string> missing_optional_extensions;
+  missing_optional_extensions.reserve(request.optional_extensions.size());
+  for (const std::string &name : request.optional_extensions) {
+    if (available_set.contains(name)) {
+      append_unique(&enabled_extensions, name);
+    } else {
+      append_unique(&missing_optional_extensions, name);
+    }
+  }
+
+  return {enabled_extensions, missing_optional_extensions};
+}
+
+/**
+ * @brief Select queue families for graphics, compute, and transfer.
+ * @param physical_device Physical device to inspect.
+ * @return Queue selection when a graphics queue exists, otherwise `std::nullopt`.
+ */
+std::optional<QueueSelection> select_queue_families(const vk::raii::PhysicalDevice &physical_device) {
+  const std::vector<vk::QueueFamilyProperties> queue_properties = physical_device.getQueueFamilyProperties();
+
+  std::optional<std::uint32_t> graphics_family;
+  std::optional<std::uint32_t> dedicated_compute_family;
+  std::optional<std::uint32_t> fallback_compute_family;
+  std::optional<std::uint32_t> dedicated_transfer_family;
+  std::optional<std::uint32_t> fallback_transfer_family;
+
+  for (std::uint32_t family_index = 0; family_index < queue_properties.size(); ++family_index) {
+    const vk::QueueFlags flags = queue_properties[family_index].queueFlags;
+
+    if (!graphics_family.has_value() && static_cast<bool>(flags & vk::QueueFlagBits::eGraphics)) {
+      graphics_family = family_index;
     }
 
-    /**
-     * @brief Convert string storage into stable C string pointers.
-     * @param names String storage owning target data.
-     * @return Pointer array referencing strings in @p names.
-     */
-    std::vector<const char *> to_c_string_ptrs(const std::vector<std::string> &names) {
-      std::vector<const char *> out;
-      out.reserve(names.size());
-      for (const std::string &name: names) {
-        out.push_back(name.c_str());
-      }
-      return out;
-    }
-
-    /**
-     * @brief Enumerate Vulkan instance extension names.
-     * @param context Vulkan RAII context.
-     * @return Available extension names.
-     */
-    std::vector<std::string> enumerate_instance_extension_names(const vk::raii::Context &context) {
-      const std::vector<vk::ExtensionProperties> properties = context.enumerateInstanceExtensionProperties();
-      std::vector<std::string> names;
-      names.reserve(properties.size());
-      for (const vk::ExtensionProperties &property: properties) {
-        names.emplace_back(property.extensionName);
-      }
-      return names;
-    }
-
-    /**
-     * @brief Enumerate Vulkan instance layer names.
-     * @param context Vulkan RAII context.
-     * @return Available layer names.
-     */
-    std::vector<std::string> enumerate_instance_layer_names(const vk::raii::Context &context) {
-      const std::vector<vk::LayerProperties> properties = context.enumerateInstanceLayerProperties();
-      std::vector<std::string> names;
-      names.reserve(properties.size());
-      for (const vk::LayerProperties &property: properties) {
-        names.emplace_back(property.layerName);
-      }
-      return names;
-    }
-
-    /**
-     * @brief Enumerate Vulkan device extension names for one physical device.
-     * @param physical_device Physical device to query.
-     * @return Available device-extension names.
-     */
-    std::vector<std::string> enumerate_device_extension_names(const vk::raii::PhysicalDevice &physical_device) {
-      const std::vector<vk::ExtensionProperties> properties = physical_device.enumerateDeviceExtensionProperties();
-      std::vector<std::string> names;
-      names.reserve(properties.size());
-      for (const vk::ExtensionProperties &property: properties) {
-        names.emplace_back(property.extensionName);
-      }
-      return names;
-    }
-
-    /**
-     * @brief Validate that all required names are present in available names.
-     * @param available Available names.
-     * @param required Required names.
-     * @param category Category used in diagnostics (e.g. "instance extension").
-     */
-    void validate_required_names(const std::vector<std::string> &available, const std::vector<std::string> &required, const std::string_view category) {
-      std::unordered_set<std::string> available_set(available.begin(), available.end());
-      std::vector<std::string> missing;
-      missing.reserve(required.size());
-      for (const std::string &name: required) {
-        if (!available_set.contains(name)) {
-          missing.push_back(name);
+    if (static_cast<bool>(flags & vk::QueueFlagBits::eCompute)) {
+      if (!static_cast<bool>(flags & vk::QueueFlagBits::eGraphics)) {
+        if (!dedicated_compute_family.has_value()) {
+          dedicated_compute_family = family_index;
         }
-      }
-
-      if (!missing.empty()) {
-        throw std::runtime_error(fmt::format("Missing required {}(s): {}", category, fmt::join(missing, ", ")));
+      } else if (!fallback_compute_family.has_value()) {
+        fallback_compute_family = family_index;
       }
     }
 
-    /**
-     * @brief Merge legacy and profile-based device-extension requests.
-     * @param info Engine initialization input.
-     * @return Consolidated device profile request.
-     */
-    DeviceProfileRequest build_device_profile_request(const EngineInitInfo &info) {
-      DeviceProfileRequest request = info.device_profile;
-      for (const std::string &extension : info.required_device_extensions) {
-        append_unique(&request.required_extensions, extension);
+    if (static_cast<bool>(flags & vk::QueueFlagBits::eTransfer)) {
+      const bool has_graphics = static_cast<bool>(flags & vk::QueueFlagBits::eGraphics);
+      const bool has_compute = static_cast<bool>(flags & vk::QueueFlagBits::eCompute);
+
+      if (!has_graphics && !has_compute) {
+        if (!dedicated_transfer_family.has_value()) {
+          dedicated_transfer_family = family_index;
+        }
+      } else if (!fallback_transfer_family.has_value()) {
+        fallback_transfer_family = family_index;
       }
-      return request;
+    }
+  }
+
+  if (!graphics_family.has_value()) {
+    return std::nullopt;
+  }
+
+  std::optional<std::uint32_t> async_compute_family = dedicated_compute_family;
+  if (!async_compute_family.has_value()) {
+    async_compute_family = fallback_compute_family;
+  }
+  if (!async_compute_family.has_value()) {
+    async_compute_family = graphics_family;
+  }
+
+  std::optional<std::uint32_t> transfer_family = dedicated_transfer_family;
+  if (!transfer_family.has_value()) {
+    transfer_family = fallback_transfer_family;
+  }
+  if (!transfer_family.has_value()) {
+    transfer_family = async_compute_family;
+  }
+  if (!transfer_family.has_value()) {
+    transfer_family = graphics_family;
+  }
+
+  return QueueSelection{
+    .indices =
+      QueueFamilyIndices{
+        .graphics = *graphics_family,
+        .async_compute = async_compute_family,
+        .transfer = transfer_family,
+      },
+    .has_dedicated_async_compute = dedicated_compute_family.has_value(),
+    .has_dedicated_transfer = dedicated_transfer_family.has_value(),
+  };
+}
+
+/**
+ * @brief Find the best physical device for engine initialization.
+ * @param physical_devices Candidate physical devices.
+ * @param info Initialization constraints.
+ * @return Selected device index and queue selection.
+ */
+DeviceSelection select_physical_device(const vk::raii::PhysicalDevices &physical_devices, const EngineInitInfo &info,
+                                       const DeviceProfileRequest &profile_request) {
+  struct Candidate {
+    DeviceSelection selection{};
+    int score = 0;
+  };
+
+  std::optional<Candidate> best;
+  std::vector<std::string> rejection_reasons;
+
+  for (std::size_t index = 0; index < physical_devices.size(); ++index) {
+    const vk::raii::PhysicalDevice &physical_device = physical_devices[index];
+    const auto selected_queues = select_queue_families(physical_device);
+    if (!selected_queues.has_value()) {
+      rejection_reasons.push_back(fmt::format("device[{}]: missing graphics queue", index));
+      continue;
     }
 
-    /**
-     * @brief Resolve enabled device extensions from available and requested sets.
-     * @param available Available device extension names.
-     * @param request Device profile request.
-     * @return Enabled extensions and missing optional extensions.
-     */
-    std::pair<std::vector<std::string>, std::vector<std::string>> resolve_device_extensions(
-        const std::vector<std::string> &available,
-        const DeviceProfileRequest &request
-    ) {
-      validate_required_names(available, request.required_extensions, "device extension");
-
-      std::unordered_set<std::string> available_set(available.begin(), available.end());
-      std::vector<std::string> enabled_extensions;
-      enabled_extensions.reserve(request.required_extensions.size() + request.optional_extensions.size());
-      for (const std::string &name : request.required_extensions) {
-        append_unique(&enabled_extensions, name);
-      }
-
-      std::vector<std::string> missing_optional_extensions;
-      missing_optional_extensions.reserve(request.optional_extensions.size());
-      for (const std::string &name : request.optional_extensions) {
-        if (available_set.contains(name)) {
-          append_unique(&enabled_extensions, name);
-        } else {
-          append_unique(&missing_optional_extensions, name);
-        }
-      }
-
-      return {enabled_extensions, missing_optional_extensions};
+    if (info.require_async_compute && !selected_queues->has_dedicated_async_compute) {
+      rejection_reasons.push_back(fmt::format("device[{}]: dedicated async compute queue not available", index));
+      continue;
+    }
+    if (info.require_dedicated_transfer && !selected_queues->has_dedicated_transfer) {
+      rejection_reasons.push_back(fmt::format("device[{}]: dedicated transfer queue not available", index));
+      continue;
     }
 
-    /**
-     * @brief Select queue families for graphics, compute, and transfer.
-     * @param physical_device Physical device to inspect.
-     * @return Queue selection when a graphics queue exists, otherwise `std::nullopt`.
-     */
-    std::optional<QueueSelection> select_queue_families(const vk::raii::PhysicalDevice &physical_device) {
-      const std::vector<vk::QueueFamilyProperties> queue_properties = physical_device.getQueueFamilyProperties();
+    const std::vector<std::string> available_device_extensions = enumerate_device_extension_names(physical_device);
+    std::vector<std::string> enabled_extensions;
+    std::vector<std::string> missing_optional_extensions;
+    try {
+      std::tie(enabled_extensions, missing_optional_extensions) = resolve_device_extensions(available_device_extensions, profile_request);
+    } catch (const std::exception &ex) {
+      rejection_reasons.push_back(fmt::format("device[{}]: {}", index, ex.what()));
+      continue;
+    }
 
-      std::optional<std::uint32_t> graphics_family;
-      std::optional<std::uint32_t> dedicated_compute_family;
-      std::optional<std::uint32_t> fallback_compute_family;
-      std::optional<std::uint32_t> dedicated_transfer_family;
-      std::optional<std::uint32_t> fallback_transfer_family;
+    const vk::PhysicalDeviceProperties properties = physical_device.getProperties();
+    int score = 0;
+    switch (properties.deviceType) {
+    case vk::PhysicalDeviceType::eDiscreteGpu:
+      score += info.prefer_discrete_gpu ? 1000 : 100;
+      break;
+    case vk::PhysicalDeviceType::eIntegratedGpu:
+      score += info.prefer_discrete_gpu ? 500 : 1000;
+      break;
+    case vk::PhysicalDeviceType::eVirtualGpu:
+      score += 250;
+      break;
+    case vk::PhysicalDeviceType::eCpu:
+      score += 100;
+      break;
+    default:
+      score += 50;
+      break;
+    }
 
-      for (std::uint32_t family_index = 0; family_index < queue_properties.size(); ++family_index) {
-        const vk::QueueFlags flags = queue_properties[family_index].queueFlags;
+    if (selected_queues->has_dedicated_async_compute) {
+      score += 50;
+    }
+    if (selected_queues->has_dedicated_transfer) {
+      score += 50;
+    }
+    const int optional_extension_bonus = static_cast<int>(profile_request.optional_extensions.size()) - static_cast<int>(missing_optional_extensions.size());
+    score += optional_extension_bonus * 5;
 
-        if (!graphics_family.has_value() && static_cast<bool>(flags & vk::QueueFlagBits::eGraphics)) {
-          graphics_family = family_index;
-        }
-
-        if (static_cast<bool>(flags & vk::QueueFlagBits::eCompute)) {
-          if (!static_cast<bool>(flags & vk::QueueFlagBits::eGraphics)) {
-            if (!dedicated_compute_family.has_value()) {
-              dedicated_compute_family = family_index;
-            }
-          } else if (!fallback_compute_family.has_value()) {
-            fallback_compute_family = family_index;
-          }
-        }
-
-        if (static_cast<bool>(flags & vk::QueueFlagBits::eTransfer)) {
-          const bool has_graphics = static_cast<bool>(flags & vk::QueueFlagBits::eGraphics);
-          const bool has_compute = static_cast<bool>(flags & vk::QueueFlagBits::eCompute);
-
-          if (!has_graphics && !has_compute) {
-            if (!dedicated_transfer_family.has_value()) {
-              dedicated_transfer_family = family_index;
-            }
-          } else if (!fallback_transfer_family.has_value()) {
-            fallback_transfer_family = family_index;
-          }
-        }
-      }
-
-      if (!graphics_family.has_value()) {
-        return std::nullopt;
-      }
-
-      std::optional<std::uint32_t> async_compute_family = dedicated_compute_family;
-      if (!async_compute_family.has_value()) {
-        async_compute_family = fallback_compute_family;
-      }
-      if (!async_compute_family.has_value()) {
-        async_compute_family = graphics_family;
-      }
-
-      std::optional<std::uint32_t> transfer_family = dedicated_transfer_family;
-      if (!transfer_family.has_value()) {
-        transfer_family = fallback_transfer_family;
-      }
-      if (!transfer_family.has_value()) {
-        transfer_family = async_compute_family;
-      }
-      if (!transfer_family.has_value()) {
-        transfer_family = graphics_family;
-      }
-
-      return QueueSelection{
-        .indices =
-        QueueFamilyIndices{
-          .graphics = *graphics_family,
-          .async_compute = async_compute_family,
-          .transfer = transfer_family,
+    const Candidate candidate{
+      .selection =
+        DeviceSelection{
+          .index = index,
+          .queues = *selected_queues,
+          .enabled_extensions = enabled_extensions,
+          .missing_optional_extensions = missing_optional_extensions,
         },
-        .has_dedicated_async_compute = dedicated_compute_family.has_value(),
-        .has_dedicated_transfer = dedicated_transfer_family.has_value(),
-      };
+      .score = score,
+    };
+
+    if (!best.has_value() || candidate.score > best->score) {
+      best = candidate;
     }
+  }
 
-    /**
-     * @brief Find the best physical device for engine initialization.
-     * @param physical_devices Candidate physical devices.
-     * @param info Initialization constraints.
-     * @return Selected device index and queue selection.
-     */
-    DeviceSelection select_physical_device(
-        const vk::raii::PhysicalDevices &physical_devices,
-        const EngineInitInfo &info,
-        const DeviceProfileRequest &profile_request
-    ) {
-      struct Candidate {
-        DeviceSelection selection{};
-        int score = 0;
-      };
-
-      std::optional<Candidate> best;
-      std::vector<std::string> rejection_reasons;
-
-      for (std::size_t index = 0; index < physical_devices.size(); ++index) {
-        const vk::raii::PhysicalDevice &physical_device = physical_devices[index];
-        const auto selected_queues = select_queue_families(physical_device);
-        if (!selected_queues.has_value()) {
-          rejection_reasons.push_back(fmt::format("device[{}]: missing graphics queue", index));
-          continue;
-        }
-
-        if (info.require_async_compute && !selected_queues->has_dedicated_async_compute) {
-          rejection_reasons.push_back(fmt::format("device[{}]: dedicated async compute queue not available", index));
-          continue;
-        }
-        if (info.require_dedicated_transfer && !selected_queues->has_dedicated_transfer) {
-          rejection_reasons.push_back(fmt::format("device[{}]: dedicated transfer queue not available", index));
-          continue;
-        }
-
-        const std::vector<std::string> available_device_extensions = enumerate_device_extension_names(physical_device);
-        std::vector<std::string> enabled_extensions;
-        std::vector<std::string> missing_optional_extensions;
-        try {
-          std::tie(enabled_extensions, missing_optional_extensions) = resolve_device_extensions(available_device_extensions, profile_request);
-        } catch (const std::exception &ex) {
-          rejection_reasons.push_back(fmt::format("device[{}]: {}", index, ex.what()));
-          continue;
-        }
-
-        const vk::PhysicalDeviceProperties properties = physical_device.getProperties();
-        int score = 0;
-        switch (properties.deviceType) {
-          case vk::PhysicalDeviceType::eDiscreteGpu:
-            score += info.prefer_discrete_gpu ? 1000 : 100;
-            break;
-          case vk::PhysicalDeviceType::eIntegratedGpu:
-            score += info.prefer_discrete_gpu ? 500 : 1000;
-            break;
-          case vk::PhysicalDeviceType::eVirtualGpu:
-            score += 250;
-            break;
-          case vk::PhysicalDeviceType::eCpu:
-            score += 100;
-            break;
-          default:
-            score += 50;
-            break;
-        }
-
-        if (selected_queues->has_dedicated_async_compute) {
-          score += 50;
-        }
-        if (selected_queues->has_dedicated_transfer) {
-          score += 50;
-        }
-        const int optional_extension_bonus =
-            static_cast<int>(profile_request.optional_extensions.size()) - static_cast<int>(missing_optional_extensions.size());
-        score += optional_extension_bonus * 5;
-
-        const Candidate candidate{
-          .selection =
-          DeviceSelection{
-            .index = index,
-            .queues = *selected_queues,
-            .enabled_extensions = enabled_extensions,
-            .missing_optional_extensions = missing_optional_extensions,
-          },
-          .score = score,
-        };
-
-        if (!best.has_value() || candidate.score > best->score) {
-          best = candidate;
-        }
-      }
-
-      if (!best.has_value()) {
-        std::string details = "<no candidate devices>";
-        if (!rejection_reasons.empty()) {
-          details = fmt::format("{}", fmt::join(rejection_reasons, " | "));
-        }
-        throw std::runtime_error(fmt::format("Unable to select a suitable Vulkan physical device: {}", details));
-      }
-
-      return std::move(best->selection);
+  if (!best.has_value()) {
+    std::string details = "<no candidate devices>";
+    if (!rejection_reasons.empty()) {
+      details = fmt::format("{}", fmt::join(rejection_reasons, " | "));
     }
+    throw make_engine_error(EngineErrorCode::kNoSuitableDevice, fmt::format("Unable to select a suitable Vulkan physical device: {}", details));
+  }
 
-    /**
-     * @brief Build unique queue-create infos from selected queue families.
-     * @param indices Selected queue-family indices.
-     * @return Queue-create-info vector ready for device creation.
-     */
-    std::vector<vk::DeviceQueueCreateInfo> build_queue_create_infos(const QueueFamilyIndices &indices) {
-      const float queue_priority = 1.0F;
-      std::set<std::uint32_t> unique_families{indices.graphics};
-      if (indices.async_compute.has_value()) {
-        unique_families.insert(*indices.async_compute);
-      }
-      if (indices.transfer.has_value()) {
-        unique_families.insert(*indices.transfer);
-      }
+  return std::move(best->selection);
+}
 
-      std::vector<vk::DeviceQueueCreateInfo> create_infos;
-      create_infos.reserve(unique_families.size());
-      for (const std::uint32_t family_index: unique_families) {
-        create_infos.push_back(vk::DeviceQueueCreateInfo{}.setQueueFamilyIndex(family_index).setQueueCount(1U).setPQueuePriorities(&queue_priority));
-      }
-      return create_infos;
-    }
+/**
+ * @brief Build unique queue-create infos from selected queue families.
+ * @param indices Selected queue-family indices.
+ * @return Queue-create-info vector ready for device creation.
+ */
+std::vector<vk::DeviceQueueCreateInfo> build_queue_create_infos(const QueueFamilyIndices &indices) {
+  const float queue_priority = 1.0F;
+  std::set<std::uint32_t> unique_families{indices.graphics};
+  if (indices.async_compute.has_value()) {
+    unique_families.insert(*indices.async_compute);
+  }
+  if (indices.transfer.has_value()) {
+    unique_families.insert(*indices.transfer);
+  }
 
-    /**
-     * @brief Vulkan debug callback used by the debug-utils messenger.
-     */
-    VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback(const VkDebugUtilsMessageSeverityFlagBitsEXT severity,
-                                                         const VkDebugUtilsMessageTypeFlagsEXT message_type,
-                                                         const VkDebugUtilsMessengerCallbackDataEXT *callback_data, void * /*user_data*/
-    ) {
-      const char *message = (callback_data != nullptr && callback_data->pMessage != nullptr) ? callback_data->pMessage : "<no message>";
-      if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0U) {
-        spdlog::error("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
-      } else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0U) {
-        spdlog::warn("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
-      } else {
-        spdlog::info("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
-      }
-      return VK_FALSE;
-    }
-  } // namespace
+  std::vector<vk::DeviceQueueCreateInfo> create_infos;
+  create_infos.reserve(unique_families.size());
+  for (const std::uint32_t family_index : unique_families) {
+    create_infos.push_back(vk::DeviceQueueCreateInfo{}.setQueueFamilyIndex(family_index).setQueueCount(1U).setPQueuePriorities(&queue_priority));
+  }
+  return create_infos;
+}
 
-  EngineContext::EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
-                               vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices,
-                               const vk::Queue graphics_queue, std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue,
-                               const bool validation_enabled, QueueTopology queue_topology, DeviceProfile device_profile)
+/**
+ * @brief Vulkan debug callback used by the debug-utils messenger.
+ */
+VKAPI_ATTR VkBool32 VKAPI_CALL vulkan_debug_callback(const VkDebugUtilsMessageSeverityFlagBitsEXT severity, const VkDebugUtilsMessageTypeFlagsEXT message_type,
+                                                     const VkDebugUtilsMessengerCallbackDataEXT *callback_data, void * /*user_data*/
+) {
+  const char *message = (callback_data != nullptr && callback_data->pMessage != nullptr) ? callback_data->pMessage : "<no message>";
+  if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0U) {
+    spdlog::error("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
+  } else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0U) {
+    spdlog::warn("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
+  } else {
+    spdlog::info("Vulkan validation [{:#x}]: {}", static_cast<std::uint32_t>(message_type), message);
+  }
+  return VK_FALSE;
+}
+} // namespace
+
+EngineContext::EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
+                             vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices,
+                             const vk::Queue graphics_queue, std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue,
+                             const bool validation_enabled, QueueTopology queue_topology, DeviceProfile device_profile)
     : context_(std::move(context)), instance_(std::move(instance)), debug_messenger_(std::move(debug_messenger)), physical_device_(std::move(physical_device)),
       device_(std::move(device)), queue_family_indices_(queue_family_indices), graphics_queue_(graphics_queue), async_compute_queue_(async_compute_queue),
       transfer_queue_(transfer_queue), validation_enabled_(validation_enabled), queue_topology_(std::move(queue_topology)),
-      device_profile_(std::move(device_profile)) {
+      device_profile_(std::move(device_profile)) {}
+
+EngineContext EngineContext::create(const EngineInitInfo &info) {
+  vk::raii::Context context;
+
+  std::vector<std::string> required_layers = info.required_instance_layers;
+  std::vector<std::string> required_instance_extensions = info.required_instance_extensions;
+  if (info.enable_validation) {
+    append_unique(&required_layers, kValidationLayerName);
+    append_unique(&required_instance_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
   }
 
-  EngineContext EngineContext::create(const EngineInitInfo &info) {
-    vk::raii::Context context;
+  validate_required_names(enumerate_instance_layer_names(context), required_layers, "instance layer");
+  validate_required_names(enumerate_instance_extension_names(context), required_instance_extensions, "instance extension");
 
-    std::vector<std::string> required_layers = info.required_instance_layers;
-    std::vector<std::string> required_instance_extensions = info.required_instance_extensions;
-    if (info.enable_validation) {
-      append_unique(&required_layers, kValidationLayerName);
-      append_unique(&required_instance_extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
+  const std::vector<const char *> instance_layer_ptrs = to_c_string_ptrs(required_layers);
+  const std::vector<const char *> instance_extension_ptrs = to_c_string_ptrs(required_instance_extensions);
 
-    validate_required_names(enumerate_instance_layer_names(context), required_layers, "instance layer");
-    validate_required_names(enumerate_instance_extension_names(context), required_instance_extensions, "instance extension");
+  const vk::ApplicationInfo application_info = vk::ApplicationInfo{}
+                                                 .setPApplicationName(info.application_name.c_str())
+                                                 .setApplicationVersion(info.application_version)
+                                                 .setPEngineName("varre-engine")
+                                                 .setEngineVersion(info.engine_version)
+                                                 .setApiVersion(info.api_version);
 
-    const std::vector<const char *> instance_layer_ptrs = to_c_string_ptrs(required_layers);
-    const std::vector<const char *> instance_extension_ptrs = to_c_string_ptrs(required_instance_extensions);
+  const vk::InstanceCreateInfo instance_create_info = vk::InstanceCreateInfo{}
+                                                        .setPApplicationInfo(&application_info)
+                                                        .setEnabledLayerCount(static_cast<std::uint32_t>(instance_layer_ptrs.size()))
+                                                        .setPpEnabledLayerNames(instance_layer_ptrs.data())
+                                                        .setEnabledExtensionCount(static_cast<std::uint32_t>(instance_extension_ptrs.size()))
+                                                        .setPpEnabledExtensionNames(instance_extension_ptrs.data());
 
-    const vk::ApplicationInfo application_info = vk::ApplicationInfo{}
-        .setPApplicationName(info.application_name.c_str())
-        .setApplicationVersion(info.application_version)
-        .setPEngineName("varre-engine")
-        .setEngineVersion(info.engine_version)
-        .setApiVersion(info.api_version);
+  vk::raii::Instance instance(context, instance_create_info);
 
-    const vk::InstanceCreateInfo instance_create_info = vk::InstanceCreateInfo{}
-        .setPApplicationInfo(&application_info)
-        .setEnabledLayerCount(static_cast<std::uint32_t>(instance_layer_ptrs.size()))
-        .setPpEnabledLayerNames(instance_layer_ptrs.data())
-        .setEnabledExtensionCount(static_cast<std::uint32_t>(instance_extension_ptrs.size()))
-        .setPpEnabledExtensionNames(instance_extension_ptrs.data());
-
-    vk::raii::Instance instance(context, instance_create_info);
-
-    vk::raii::DebugUtilsMessengerEXT debug_messenger{nullptr};
-    if (info.enable_validation) {
-      const vk::DebugUtilsMessengerCreateInfoEXT debug_create_info =
-          vk::DebugUtilsMessengerCreateInfoEXT{}
-          .setMessageSeverity(vk::DebugUtilsMessageSeverityFlagBitsEXT::eError | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning)
-          .setMessageType(vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation |
-                          vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance)
-          .setPfnUserCallback(vk::PFN_DebugUtilsMessengerCallbackEXT(&vulkan_debug_callback));
-      debug_messenger = vk::raii::DebugUtilsMessengerEXT(instance, debug_create_info);
-    }
-
-    vk::raii::PhysicalDevices physical_devices(instance);
-    if (physical_devices.empty()) {
-      throw std::runtime_error("No Vulkan physical devices are available.");
-    }
-
-    const DeviceProfileRequest device_profile_request = build_device_profile_request(info);
-    const DeviceSelection selected_device = select_physical_device(physical_devices, info, device_profile_request);
-    vk::raii::PhysicalDevice physical_device = std::move(physical_devices[selected_device.index]);
-
-    const std::vector<const char *> enabled_device_extension_ptrs = to_c_string_ptrs(selected_device.enabled_extensions);
-    const std::vector<vk::DeviceQueueCreateInfo> queue_create_infos = build_queue_create_infos(selected_device.queues.indices);
-
-    const vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo{}
-        .setQueueCreateInfos(queue_create_infos)
-        .setEnabledExtensionCount(static_cast<std::uint32_t>(enabled_device_extension_ptrs.size()))
-        .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
-
-    vk::raii::Device device(physical_device, device_create_info);
-
-    const vk::Queue graphics_queue = device.getQueue(selected_device.queues.indices.graphics, 0);
-    std::optional<vk::Queue> async_compute_queue;
-    if (selected_device.queues.indices.async_compute.has_value()) {
-      async_compute_queue = device.getQueue(*selected_device.queues.indices.async_compute, 0);
-    }
-
-    std::optional<vk::Queue> transfer_queue;
-    if (selected_device.queues.indices.transfer.has_value()) {
-      transfer_queue = device.getQueue(*selected_device.queues.indices.transfer, 0);
-    }
-
-    QueueTopology queue_topology{
-      .families = selected_device.queues.indices,
-      .graphics_queue = graphics_queue,
-      .async_compute_queue = async_compute_queue,
-      .transfer_queue = transfer_queue,
-      .has_dedicated_async_compute = selected_device.queues.has_dedicated_async_compute,
-      .has_dedicated_transfer = selected_device.queues.has_dedicated_transfer,
-    };
-
-    const vk::PhysicalDeviceProperties selected_properties = physical_device.getProperties();
-    DeviceProfile resolved_device_profile{
-      .device_name = selected_properties.deviceName,
-      .device_type = selected_properties.deviceType,
-      .vendor_id = selected_properties.vendorID,
-      .device_id = selected_properties.deviceID,
-      .api_version = selected_properties.apiVersion,
-      .enabled_extensions = selected_device.enabled_extensions,
-      .missing_optional_extensions = selected_device.missing_optional_extensions,
-    };
-
-    return EngineContext{
-      std::move(context),
-      std::move(instance),
-      std::move(debug_messenger),
-      std::move(physical_device),
-      std::move(device),
-      selected_device.queues.indices,
-      graphics_queue,
-      async_compute_queue,
-      transfer_queue,
-      info.enable_validation,
-      std::move(queue_topology),
-      std::move(resolved_device_profile),
-    };
+  vk::raii::DebugUtilsMessengerEXT debug_messenger{nullptr};
+  if (info.enable_validation) {
+    const vk::DebugUtilsMessengerCreateInfoEXT debug_create_info =
+      vk::DebugUtilsMessengerCreateInfoEXT{}
+        .setMessageSeverity(vk::DebugUtilsMessageSeverityFlagBitsEXT::eError | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning)
+        .setMessageType(vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation |
+                        vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance)
+        .setPfnUserCallback(vk::PFN_DebugUtilsMessengerCallbackEXT(&vulkan_debug_callback));
+    debug_messenger = vk::raii::DebugUtilsMessengerEXT(instance, debug_create_info);
   }
 
-  const vk::raii::Context &EngineContext::context() const noexcept { return context_; }
+  vk::raii::PhysicalDevices physical_devices(instance);
+  if (physical_devices.empty()) {
+    throw make_engine_error(EngineErrorCode::kNoSuitableDevice, "No Vulkan physical devices are available.");
+  }
 
-  const vk::raii::Instance &EngineContext::instance() const noexcept { return instance_; }
+  const DeviceProfileRequest device_profile_request = build_device_profile_request(info);
+  const DeviceSelection selected_device = select_physical_device(physical_devices, info, device_profile_request);
+  vk::raii::PhysicalDevice physical_device = std::move(physical_devices[selected_device.index]);
 
-  vk::PhysicalDevice EngineContext::physical_device() const noexcept { return *physical_device_; }
+  const std::vector<const char *> enabled_device_extension_ptrs = to_c_string_ptrs(selected_device.enabled_extensions);
+  const std::vector<vk::DeviceQueueCreateInfo> queue_create_infos = build_queue_create_infos(selected_device.queues.indices);
 
-  const vk::raii::PhysicalDevice &EngineContext::physical_device_raii() const noexcept { return physical_device_; }
+  const vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo{}
+                                                    .setQueueCreateInfos(queue_create_infos)
+                                                    .setEnabledExtensionCount(static_cast<std::uint32_t>(enabled_device_extension_ptrs.size()))
+                                                    .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
 
-  const vk::raii::Device &EngineContext::device() const noexcept { return device_; }
+  vk::raii::Device device(physical_device, device_create_info);
 
-  const QueueFamilyIndices &EngineContext::queue_family_indices() const noexcept { return queue_family_indices_; }
+  const vk::Queue graphics_queue = device.getQueue(selected_device.queues.indices.graphics, 0);
+  std::optional<vk::Queue> async_compute_queue;
+  if (selected_device.queues.indices.async_compute.has_value()) {
+    async_compute_queue = device.getQueue(*selected_device.queues.indices.async_compute, 0);
+  }
 
-  const QueueTopology &EngineContext::queue_topology() const noexcept { return queue_topology_; }
+  std::optional<vk::Queue> transfer_queue;
+  if (selected_device.queues.indices.transfer.has_value()) {
+    transfer_queue = device.getQueue(*selected_device.queues.indices.transfer, 0);
+  }
 
-  vk::Queue EngineContext::graphics_queue() const noexcept { return graphics_queue_; }
+  QueueTopology queue_topology{
+    .families = selected_device.queues.indices,
+    .graphics_queue = graphics_queue,
+    .async_compute_queue = async_compute_queue,
+    .transfer_queue = transfer_queue,
+    .has_dedicated_async_compute = selected_device.queues.has_dedicated_async_compute,
+    .has_dedicated_transfer = selected_device.queues.has_dedicated_transfer,
+  };
 
-  std::optional<vk::Queue> EngineContext::async_compute_queue() const noexcept { return async_compute_queue_; }
+  const vk::PhysicalDeviceProperties selected_properties = physical_device.getProperties();
+  DeviceProfile resolved_device_profile{
+    .device_name = selected_properties.deviceName,
+    .device_type = selected_properties.deviceType,
+    .vendor_id = selected_properties.vendorID,
+    .device_id = selected_properties.deviceID,
+    .api_version = selected_properties.apiVersion,
+    .enabled_extensions = selected_device.enabled_extensions,
+    .missing_optional_extensions = selected_device.missing_optional_extensions,
+  };
 
-  std::optional<vk::Queue> EngineContext::transfer_queue() const noexcept { return transfer_queue_; }
+  return EngineContext{
+    std::move(context),
+    std::move(instance),
+    std::move(debug_messenger),
+    std::move(physical_device),
+    std::move(device),
+    selected_device.queues.indices,
+    graphics_queue,
+    async_compute_queue,
+    transfer_queue,
+    info.enable_validation,
+    std::move(queue_topology),
+    std::move(resolved_device_profile),
+  };
+}
 
-  bool EngineContext::validation_enabled() const noexcept { return validation_enabled_; }
+const vk::raii::Context &EngineContext::context() const noexcept { return context_; }
 
-  const DeviceProfile &EngineContext::device_profile() const noexcept { return device_profile_; }
+const vk::raii::Instance &EngineContext::instance() const noexcept { return instance_; }
+
+vk::PhysicalDevice EngineContext::physical_device() const noexcept { return *physical_device_; }
+
+const vk::raii::PhysicalDevice &EngineContext::physical_device_raii() const noexcept { return physical_device_; }
+
+const vk::raii::Device &EngineContext::device() const noexcept { return device_; }
+
+const QueueFamilyIndices &EngineContext::queue_family_indices() const noexcept { return queue_family_indices_; }
+
+const QueueTopology &EngineContext::queue_topology() const noexcept { return queue_topology_; }
+
+vk::Queue EngineContext::graphics_queue() const noexcept { return graphics_queue_; }
+
+std::optional<vk::Queue> EngineContext::async_compute_queue() const noexcept { return async_compute_queue_; }
+
+std::optional<vk::Queue> EngineContext::transfer_queue() const noexcept { return transfer_queue_; }
+
+bool EngineContext::validation_enabled() const noexcept { return validation_enabled_; }
+
+const DeviceProfile &EngineContext::device_profile() const noexcept { return device_profile_; }
 } // namespace varre::engine
