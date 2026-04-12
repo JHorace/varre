@@ -13,13 +13,12 @@
 namespace varre::engine {
 
 class EngineContext;
+class SurfaceContext;
 
 /**
  * @brief Configuration for swapchain creation.
  */
 struct SwapchainCreateInfo {
-  /** @brief Window-surface handle provided by the platform layer (SDL/GLFW/etc). */
-  vk::SurfaceKHR surface = VK_NULL_HANDLE;
   /** @brief Preferred framebuffer extent when the surface does not force one. */
   vk::Extent2D preferred_extent{1280U, 720U};
   /** @brief Preferred present mode; falls back to FIFO if unavailable. */
@@ -44,11 +43,12 @@ public:
   /**
    * @brief Create a swapchain and associated image views for one surface.
    * @param engine Initialized engine context.
+   * @param surface Platform-owned surface context.
    * @param info Swapchain configuration.
    * @return Initialized swapchain context.
    * @throws std::runtime_error on capability or creation failures.
    */
-  [[nodiscard]] static SwapchainContext create(const EngineContext &engine, const SwapchainCreateInfo &info);
+  [[nodiscard]] static SwapchainContext create(const EngineContext &engine, const SurfaceContext &surface, const SwapchainCreateInfo &info = {});
 
   /**
    * @brief Move-construct the swapchain context.

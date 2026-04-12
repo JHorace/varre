@@ -14,6 +14,7 @@
 #include <fmt/format.h>
 
 #include "varre/engine/engine.hpp"
+#include "varre/engine/surface.hpp"
 
 namespace varre::engine {
   namespace {
@@ -237,16 +238,14 @@ namespace varre::engine {
       max_frames_in_flight_(max_frames_in_flight) {
   }
 
-  SwapchainContext SwapchainContext::create(const EngineContext &engine, const SwapchainCreateInfo &info) {
-    if (info.surface == VK_NULL_HANDLE) {
-      throw std::runtime_error("SwapchainCreateInfo.surface must be a valid VkSurfaceKHR.");
-    }
+  SwapchainContext SwapchainContext::create(const EngineContext &engine, const SurfaceContext &surface_context, const SwapchainCreateInfo &info) {
+    const vk::SurfaceKHR surface = surface_context.handle();
 
     const vk::raii::PhysicalDevice &physical_device = engine.physical_device_raii();
-    const vk::SurfaceCapabilitiesKHR capabilities = physical_device.getSurfaceCapabilitiesKHR(info.surface);
-    const std::vector<vk::SurfaceFormatKHR> available_formats = physical_device.getSurfaceFormatsKHR(info.surface);
-    const std::vector<vk::PresentModeKHR> available_present_modes = physical_device.getSurfacePresentModesKHR(info.surface);
-    const QueueCandidate present_candidate = select_present_queue(engine, info.surface);
+    const vk::SurfaceCapabilitiesKHR capabilities = physical_device.getSurfaceCapabilitiesKHR(surface);
+    const std::vector<vk::SurfaceFormatKHR> available_formats = physical_device.getSurfaceFormatsKHR(surface);
+    const std::vector<vk::PresentModeKHR> available_present_modes = physical_device.getSurfacePresentModesKHR(surface);
+    const QueueCandidate present_candidate = select_present_queue(engine, surface);
 
     const vk::SurfaceFormatKHR surface_format = select_surface_format(available_formats, info.preferred_format, info.preferred_color_space);
     const vk::PresentModeKHR present_mode = select_present_mode(available_present_modes, info.preferred_present_mode);
@@ -264,7 +263,7 @@ namespace varre::engine {
     const std::array queue_family_indices{graphics_family_index, present_candidate.family_index};
 
     vk::SwapchainCreateInfoKHR create_info = vk::SwapchainCreateInfoKHR{}
-        .setSurface(info.surface)
+        .setSurface(surface)
         .setMinImageCount(image_count)
         .setImageFormat(surface_format.format)
         .setImageColorSpace(surface_format.colorSpace)
@@ -297,7 +296,7 @@ namespace varre::engine {
     );
 
     return SwapchainContext{
-        info.surface,
+        surface,
         std::move(swapchain),
         std::move(images),
         std::move(image_views),

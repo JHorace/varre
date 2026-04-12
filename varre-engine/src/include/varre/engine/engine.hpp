@@ -26,6 +26,36 @@ struct QueueFamilyIndices {
 };
 
 /**
+ * @brief Requested device-profile capabilities before physical-device selection.
+ */
+struct DeviceProfileRequest {
+  /** @brief Required Vulkan device extension names. */
+  std::vector<std::string> required_extensions;
+  /** @brief Optional Vulkan device extension names enabled when available. */
+  std::vector<std::string> optional_extensions;
+};
+
+/**
+ * @brief Resolved device-profile capabilities after physical-device selection.
+ */
+struct DeviceProfile {
+  /** @brief Vulkan device name from selected physical-device properties. */
+  std::string device_name;
+  /** @brief Selected physical-device type. */
+  vk::PhysicalDeviceType device_type = vk::PhysicalDeviceType::eOther;
+  /** @brief Selected physical-device vendor identifier. */
+  std::uint32_t vendor_id = 0U;
+  /** @brief Selected physical-device device identifier. */
+  std::uint32_t device_id = 0U;
+  /** @brief Vulkan API version supported by the selected physical device. */
+  std::uint32_t api_version = VK_API_VERSION_1_0;
+  /** @brief Device extensions enabled on logical-device creation. */
+  std::vector<std::string> enabled_extensions;
+  /** @brief Optional extensions requested but unavailable on the selected device. */
+  std::vector<std::string> missing_optional_extensions;
+};
+
+/**
  * @brief Configuration for Vulkan core initialization.
  */
 struct EngineInitInfo {
@@ -49,8 +79,14 @@ struct EngineInitInfo {
   std::vector<std::string> required_instance_extensions;
   /** @brief Required Vulkan instance layer names. */
   std::vector<std::string> required_instance_layers;
-  /** @brief Required Vulkan device extension names. */
+  /**
+   * @brief Required Vulkan device extension names.
+   *
+   * This legacy field is merged into `device_profile.required_extensions`.
+   */
   std::vector<std::string> required_device_extensions;
+  /** @brief Device profile request used during physical-device negotiation. */
+  DeviceProfileRequest device_profile;
 };
 
 /**
@@ -142,13 +178,20 @@ public:
    */
   [[nodiscard]] bool validation_enabled() const noexcept;
 
+  /**
+   * @brief Access the resolved device profile used for logical-device creation.
+   * @return Immutable negotiated device profile.
+   */
+  [[nodiscard]] const DeviceProfile &device_profile() const noexcept;
+
 private:
   /**
    * @brief Internal constructor from already-initialized RAII objects.
    */
   EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
                 vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices, vk::Queue graphics_queue,
-                std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue, bool validation_enabled);
+                std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue, bool validation_enabled,
+                DeviceProfile device_profile);
 
   vk::raii::Context context_;
   vk::raii::Instance instance_{nullptr};
@@ -160,6 +203,7 @@ private:
   std::optional<vk::Queue> async_compute_queue_;
   std::optional<vk::Queue> transfer_queue_;
   bool validation_enabled_ = false;
+  DeviceProfile device_profile_{};
 };
 
 } // namespace varre::engine

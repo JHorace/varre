@@ -1,6 +1,7 @@
 add_library(
   varre_engine STATIC
   engine.cpp
+  surface.cpp
   swapchain.cpp
   frame_loop.cpp
 )

@@ -9,6 +9,7 @@
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -31,6 +32,16 @@ namespace varre::engine {
       QueueFamilyIndices indices;
       bool has_dedicated_async_compute = false;
       bool has_dedicated_transfer = false;
+    };
+
+    /**
+     * @brief Selected physical-device outcome, including negotiated profile.
+     */
+    struct DeviceSelection {
+      std::size_t index = 0U;
+      QueueSelection queues{};
+      std::vector<std::string> enabled_extensions;
+      std::vector<std::string> missing_optional_extensions;
     };
 
     /**
@@ -126,6 +137,51 @@ namespace varre::engine {
     }
 
     /**
+     * @brief Merge legacy and profile-based device-extension requests.
+     * @param info Engine initialization input.
+     * @return Consolidated device profile request.
+     */
+    DeviceProfileRequest build_device_profile_request(const EngineInitInfo &info) {
+      DeviceProfileRequest request = info.device_profile;
+      for (const std::string &extension : info.required_device_extensions) {
+        append_unique(&request.required_extensions, extension);
+      }
+      return request;
+    }
+
+    /**
+     * @brief Resolve enabled device extensions from available and requested sets.
+     * @param available Available device extension names.
+     * @param request Device profile request.
+     * @return Enabled extensions and missing optional extensions.
+     */
+    std::pair<std::vector<std::string>, std::vector<std::string>> resolve_device_extensions(
+        const std::vector<std::string> &available,
+        const DeviceProfileRequest &request
+    ) {
+      validate_required_names(available, request.required_extensions, "device extension");
+
+      std::unordered_set<std::string> available_set(available.begin(), available.end());
+      std::vector<std::string> enabled_extensions;
+      enabled_extensions.reserve(request.required_extensions.size() + request.optional_extensions.size());
+      for (const std::string &name : request.required_extensions) {
+        append_unique(&enabled_extensions, name);
+      }
+
+      std::vector<std::string> missing_optional_extensions;
+      missing_optional_extensions.reserve(request.optional_extensions.size());
+      for (const std::string &name : request.optional_extensions) {
+        if (available_set.contains(name)) {
+          append_unique(&enabled_extensions, name);
+        } else {
+          append_unique(&missing_optional_extensions, name);
+        }
+      }
+
+      return {enabled_extensions, missing_optional_extensions};
+    }
+
+    /**
      * @brief Select queue families for graphics, compute, and transfer.
      * @param physical_device Physical device to inspect.
      * @return Queue selection when a graphics queue exists, otherwise `std::nullopt`.
@@ -211,10 +267,13 @@ namespace varre::engine {
      * @param info Initialization constraints.
      * @return Selected device index and queue selection.
      */
-    std::pair<std::size_t, QueueSelection> select_physical_device(const vk::raii::PhysicalDevices &physical_devices, const EngineInitInfo &info) {
+    DeviceSelection select_physical_device(
+        const vk::raii::PhysicalDevices &physical_devices,
+        const EngineInitInfo &info,
+        const DeviceProfileRequest &profile_request
+    ) {
       struct Candidate {
-        std::size_t index = 0;
-        QueueSelection queues{};
+        DeviceSelection selection{};
         int score = 0;
       };
 
@@ -238,9 +297,11 @@ namespace varre::engine {
           continue;
         }
 
-        const auto available_device_extensions = enumerate_device_extension_names(physical_device);
+        const std::vector<std::string> available_device_extensions = enumerate_device_extension_names(physical_device);
+        std::vector<std::string> enabled_extensions;
+        std::vector<std::string> missing_optional_extensions;
         try {
-          validate_required_names(available_device_extensions, info.required_device_extensions, "device extension");
+          std::tie(enabled_extensions, missing_optional_extensions) = resolve_device_extensions(available_device_extensions, profile_request);
         } catch (const std::exception &ex) {
           rejection_reasons.push_back(fmt::format("device[{}]: {}", index, ex.what()));
           continue;
@@ -272,10 +333,18 @@ namespace varre::engine {
         if (selected_queues->has_dedicated_transfer) {
           score += 50;
         }
+        const int optional_extension_bonus =
+            static_cast<int>(profile_request.optional_extensions.size()) - static_cast<int>(missing_optional_extensions.size());
+        score += optional_extension_bonus * 5;
 
         const Candidate candidate{
-          .index = index,
-          .queues = *selected_queues,
+          .selection =
+          DeviceSelection{
+            .index = index,
+            .queues = *selected_queues,
+            .enabled_extensions = enabled_extensions,
+            .missing_optional_extensions = missing_optional_extensions,
+          },
           .score = score,
         };
 
@@ -292,7 +361,7 @@ namespace varre::engine {
         throw std::runtime_error(fmt::format("Unable to select a suitable Vulkan physical device: {}", details));
       }
 
-      return {best->index, best->queues};
+      return std::move(best->selection);
     }
 
     /**
@@ -340,10 +409,10 @@ namespace varre::engine {
   EngineContext::EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
                                vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices,
                                const vk::Queue graphics_queue, std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue,
-                               const bool validation_enabled)
+                               const bool validation_enabled, DeviceProfile device_profile)
     : context_(std::move(context)), instance_(std::move(instance)), debug_messenger_(std::move(debug_messenger)), physical_device_(std::move(physical_device)),
       device_(std::move(device)), queue_family_indices_(queue_family_indices), graphics_queue_(graphics_queue), async_compute_queue_(async_compute_queue),
-      transfer_queue_(transfer_queue), validation_enabled_(validation_enabled) {
+      transfer_queue_(transfer_queue), validation_enabled_(validation_enabled), device_profile_(std::move(device_profile)) {
   }
 
   EngineContext EngineContext::create(const EngineInitInfo &info) {
@@ -394,29 +463,41 @@ namespace varre::engine {
       throw std::runtime_error("No Vulkan physical devices are available.");
     }
 
-    const auto [selected_index, queue_selection] = select_physical_device(physical_devices, info);
-    vk::raii::PhysicalDevice physical_device = std::move(physical_devices[selected_index]);
+    const DeviceProfileRequest device_profile_request = build_device_profile_request(info);
+    const DeviceSelection selected_device = select_physical_device(physical_devices, info, device_profile_request);
+    vk::raii::PhysicalDevice physical_device = std::move(physical_devices[selected_device.index]);
 
-    const std::vector<const char *> required_device_extension_ptrs = to_c_string_ptrs(info.required_device_extensions);
-    const std::vector<vk::DeviceQueueCreateInfo> queue_create_infos = build_queue_create_infos(queue_selection.indices);
+    const std::vector<const char *> enabled_device_extension_ptrs = to_c_string_ptrs(selected_device.enabled_extensions);
+    const std::vector<vk::DeviceQueueCreateInfo> queue_create_infos = build_queue_create_infos(selected_device.queues.indices);
 
     const vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo{}
         .setQueueCreateInfos(queue_create_infos)
-        .setEnabledExtensionCount(static_cast<std::uint32_t>(required_device_extension_ptrs.size()))
-        .setPpEnabledExtensionNames(required_device_extension_ptrs.data());
+        .setEnabledExtensionCount(static_cast<std::uint32_t>(enabled_device_extension_ptrs.size()))
+        .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
 
     vk::raii::Device device(physical_device, device_create_info);
 
-    const vk::Queue graphics_queue = device.getQueue(queue_selection.indices.graphics, 0);
+    const vk::Queue graphics_queue = device.getQueue(selected_device.queues.indices.graphics, 0);
     std::optional<vk::Queue> async_compute_queue;
-    if (queue_selection.indices.async_compute.has_value()) {
-      async_compute_queue = device.getQueue(*queue_selection.indices.async_compute, 0);
+    if (selected_device.queues.indices.async_compute.has_value()) {
+      async_compute_queue = device.getQueue(*selected_device.queues.indices.async_compute, 0);
     }
 
     std::optional<vk::Queue> transfer_queue;
-    if (queue_selection.indices.transfer.has_value()) {
-      transfer_queue = device.getQueue(*queue_selection.indices.transfer, 0);
+    if (selected_device.queues.indices.transfer.has_value()) {
+      transfer_queue = device.getQueue(*selected_device.queues.indices.transfer, 0);
     }
+
+    const vk::PhysicalDeviceProperties selected_properties = physical_device.getProperties();
+    DeviceProfile resolved_device_profile{
+      .device_name = selected_properties.deviceName,
+      .device_type = selected_properties.deviceType,
+      .vendor_id = selected_properties.vendorID,
+      .device_id = selected_properties.deviceID,
+      .api_version = selected_properties.apiVersion,
+      .enabled_extensions = selected_device.enabled_extensions,
+      .missing_optional_extensions = selected_device.missing_optional_extensions,
+    };
 
     return EngineContext{
       std::move(context),
@@ -424,11 +505,12 @@ namespace varre::engine {
       std::move(debug_messenger),
       std::move(physical_device),
       std::move(device),
-      queue_selection.indices,
+      selected_device.queues.indices,
       graphics_queue,
       async_compute_queue,
       transfer_queue,
       info.enable_validation,
+      std::move(resolved_device_profile),
     };
   }
 
@@ -451,4 +533,6 @@ namespace varre::engine {
   std::optional<vk::Queue> EngineContext::transfer_queue() const noexcept { return transfer_queue_; }
 
   bool EngineContext::validation_enabled() const noexcept { return validation_enabled_; }
+
+  const DeviceProfile &EngineContext::device_profile() const noexcept { return device_profile_; }
 } // namespace varre::engine
