@@ -110,8 +110,8 @@ void validate_phase_id(const PassPhaseId phase_id, const std::size_t phase_count
 }
 } // namespace detail
 
-PassCommandEncoder::PassCommandEncoder(const vk::CommandBuffer command_buffer, const PassPhaseKind phase_kind, PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext)
-    : command_buffer_(command_buffer), phase_kind_(phase_kind), cmd_bind_shaders_ext_(cmd_bind_shaders_ext) {}
+PassCommandEncoder::PassCommandEncoder(const vk::CommandBuffer command_buffer, const PassPhaseKind phase_kind, const PassCommandDispatch command_dispatch)
+    : command_buffer_(command_buffer), phase_kind_(phase_kind), command_dispatch_(command_dispatch) {}
 
 vk::CommandBuffer PassCommandEncoder::command_buffer() const noexcept { return command_buffer_; }
 
@@ -125,7 +125,7 @@ void PassCommandEncoder::require_phase_kind(const PassPhaseKind expected, const 
 }
 
 void PassCommandEncoder::bind_shaders(const std::span<const PassShaderBinding> bindings) const {
-  if (cmd_bind_shaders_ext_ == nullptr) {
+  if (command_dispatch_.cmd_bind_shaders_ext == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot bind shader objects because vkCmdBindShadersEXT is unavailable.");
   }
   if (bindings.empty()) {
@@ -143,7 +143,8 @@ void PassCommandEncoder::bind_shaders(const std::span<const PassShaderBinding> b
     stages.push_back(static_cast<VkShaderStageFlagBits>(binding.stage));
     shaders.push_back(static_cast<VkShaderEXT>(binding.shader));
   }
-  cmd_bind_shaders_ext_(static_cast<VkCommandBuffer>(command_buffer_), static_cast<std::uint32_t>(bindings.size()), stages.data(), shaders.data());
+  command_dispatch_.cmd_bind_shaders_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<std::uint32_t>(bindings.size()), stages.data(),
+                                         shaders.data());
 }
 
 void PassCommandEncoder::bind_descriptor_sets(const vk::PipelineBindPoint bind_point, const vk::PipelineLayout layout, const std::uint32_t first_set,
@@ -286,11 +287,18 @@ void PassCommandEncoder::set_blend_constants(const std::array<float, 4> &blend_c
 
 void PassCommandEncoder::set_logic_op_enable(const bool enabled) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_logic_op_enable");
-  command_buffer_.setLogicOpEnableEXT(enabled);
+  if (command_dispatch_.cmd_set_logic_op_enable_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set logic-op enable because vkCmdSetLogicOpEnableEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_logic_op_enable_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkBool32>(enabled));
 }
 
 void PassCommandEncoder::set_color_blend_enable(const std::uint32_t first_attachment, const std::span<const vk::Bool32> enables) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_color_blend_enable");
+  if (command_dispatch_.cmd_set_color_blend_enable_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState,
+                            "PassCommandEncoder cannot set color-blend enable because vkCmdSetColorBlendEnableEXT is unavailable.");
+  }
   if (enables.empty()) {
     return;
   }
@@ -298,11 +306,16 @@ void PassCommandEncoder::set_color_blend_enable(const std::uint32_t first_attach
   if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_blend_enable attachment range overflows uint32_t.");
   }
-  command_buffer_.setColorBlendEnableEXT(first_attachment, enables);
+  command_dispatch_.cmd_set_color_blend_enable_ext(static_cast<VkCommandBuffer>(command_buffer_), first_attachment, static_cast<std::uint32_t>(enables.size()),
+                                                   enables.data());
 }
 
 void PassCommandEncoder::set_color_blend_equation(const std::uint32_t first_attachment, const std::span<const vk::ColorBlendEquationEXT> equations) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_color_blend_equation");
+  if (command_dispatch_.cmd_set_color_blend_equation_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState,
+                            "PassCommandEncoder cannot set color-blend equations because vkCmdSetColorBlendEquationEXT is unavailable.");
+  }
   if (equations.empty()) {
     return;
   }
@@ -310,11 +323,16 @@ void PassCommandEncoder::set_color_blend_equation(const std::uint32_t first_atta
   if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_blend_equation attachment range overflows uint32_t.");
   }
-  command_buffer_.setColorBlendEquationEXT(first_attachment, equations);
+  command_dispatch_.cmd_set_color_blend_equation_ext(static_cast<VkCommandBuffer>(command_buffer_), first_attachment,
+                                                     static_cast<std::uint32_t>(equations.size()),
+                                                     reinterpret_cast<const VkColorBlendEquationEXT *>(equations.data()));
 }
 
 void PassCommandEncoder::set_color_write_mask(const std::uint32_t first_attachment, const std::span<const vk::ColorComponentFlags> masks) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_color_write_mask");
+  if (command_dispatch_.cmd_set_color_write_mask_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set color-write mask because vkCmdSetColorWriteMaskEXT is unavailable.");
+  }
   if (masks.empty()) {
     return;
   }
@@ -322,16 +340,24 @@ void PassCommandEncoder::set_color_write_mask(const std::uint32_t first_attachme
   if (attachment_end > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_color_write_mask attachment range overflows uint32_t.");
   }
-  command_buffer_.setColorWriteMaskEXT(first_attachment, masks);
+  command_dispatch_.cmd_set_color_write_mask_ext(static_cast<VkCommandBuffer>(command_buffer_), first_attachment, static_cast<std::uint32_t>(masks.size()),
+                                                 reinterpret_cast<const VkColorComponentFlags *>(masks.data()));
 }
 
 void PassCommandEncoder::set_rasterization_samples(const vk::SampleCountFlagBits samples) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_rasterization_samples");
-  command_buffer_.setRasterizationSamplesEXT(samples);
+  if (command_dispatch_.cmd_set_rasterization_samples_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState,
+                            "PassCommandEncoder cannot set rasterization samples because vkCmdSetRasterizationSamplesEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_rasterization_samples_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkSampleCountFlagBits>(samples));
 }
 
 void PassCommandEncoder::set_sample_mask(const vk::SampleCountFlagBits samples, const std::span<const vk::SampleMask> sample_mask_words) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_sample_mask");
+  if (command_dispatch_.cmd_set_sample_mask_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set sample mask because vkCmdSetSampleMaskEXT is unavailable.");
+  }
   const std::uint32_t sample_count = static_cast<std::uint32_t>(samples);
   if (sample_count == 0U || (sample_count & (sample_count - 1U)) != 0U) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassCommandEncoder::set_sample_mask requires a valid power-of-two sample count.");
@@ -342,17 +368,25 @@ void PassCommandEncoder::set_sample_mask(const vk::SampleCountFlagBits samples, 
                             fmt::format("PassCommandEncoder::set_sample_mask expects {} mask word(s) for sample count {}, but received {}.",
                                         expected_word_count, sample_count, sample_mask_words.size()));
   }
-  command_buffer_.setSampleMaskEXT(samples, sample_mask_words);
+  command_dispatch_.cmd_set_sample_mask_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkSampleCountFlagBits>(samples),
+                                            sample_mask_words.data());
 }
 
 void PassCommandEncoder::set_alpha_to_coverage_enable(const bool enabled) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_alpha_to_coverage_enable");
-  command_buffer_.setAlphaToCoverageEnableEXT(enabled);
+  if (command_dispatch_.cmd_set_alpha_to_coverage_enable_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState,
+                            "PassCommandEncoder cannot set alpha-to-coverage because vkCmdSetAlphaToCoverageEnableEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_alpha_to_coverage_enable_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkBool32>(enabled));
 }
 
 void PassCommandEncoder::set_alpha_to_one_enable(const bool enabled) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_alpha_to_one_enable");
-  command_buffer_.setAlphaToOneEnableEXT(enabled);
+  if (command_dispatch_.cmd_set_alpha_to_one_enable_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set alpha-to-one because vkCmdSetAlphaToOneEnableEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_alpha_to_one_enable_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkBool32>(enabled));
 }
 
 void PassCommandEncoder::bind_vertex_buffers(const std::uint32_t first_binding, const std::span<const vk::Buffer> buffers,
@@ -411,20 +445,33 @@ std::size_t PassGraph::size() const noexcept { return phases_.size(); }
 PassExecutor::PassExecutor(const EngineContext *engine, const vk::raii::Device *device, std::vector<QueueRuntime> queue_runtimes,
                            const std::size_t graphics_queue_runtime_index, const std::size_t async_compute_queue_runtime_index,
                            const std::size_t transfer_queue_runtime_index, vk::raii::Semaphore timeline_semaphore, const PassExecutorCreateInfo create_info,
-                           PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext)
+                           const PassCommandDispatch command_dispatch)
     : engine_(engine), device_(device), queue_runtimes_(std::move(queue_runtimes)), graphics_queue_runtime_index_(graphics_queue_runtime_index),
       async_compute_queue_runtime_index_(async_compute_queue_runtime_index), transfer_queue_runtime_index_(transfer_queue_runtime_index),
-      timeline_semaphore_(std::move(timeline_semaphore)), create_info_(create_info), cmd_bind_shaders_ext_(cmd_bind_shaders_ext) {}
+      timeline_semaphore_(std::move(timeline_semaphore)), create_info_(create_info), command_dispatch_(command_dispatch) {}
 
 PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecutorCreateInfo &info) {
   detail::validate_pass_mode_device_profile(engine.device_profile());
 
-  const PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext =
-    reinterpret_cast<PFN_vkCmdBindShadersEXT>(vkGetDeviceProcAddr(static_cast<VkDevice>(*engine.device()), "vkCmdBindShadersEXT"));
-  if (cmd_bind_shaders_ext == nullptr) {
-    throw make_engine_error(
-      EngineErrorCode::kMissingRequirement,
-      "vkCmdBindShadersEXT could not be loaded even though VK_EXT_shader_object was enabled. Ensure extension feature chains are enabled.");
+  const auto load_device_proc = [&](const char *name) -> PFN_vkVoidFunction { return vkGetDeviceProcAddr(static_cast<VkDevice>(*engine.device()), name); };
+  const PassCommandDispatch command_dispatch{
+    .cmd_bind_shaders_ext = reinterpret_cast<PFN_vkCmdBindShadersEXT>(load_device_proc("vkCmdBindShadersEXT")),
+    .cmd_set_logic_op_enable_ext = reinterpret_cast<PFN_vkCmdSetLogicOpEnableEXT>(load_device_proc("vkCmdSetLogicOpEnableEXT")),
+    .cmd_set_color_blend_enable_ext = reinterpret_cast<PFN_vkCmdSetColorBlendEnableEXT>(load_device_proc("vkCmdSetColorBlendEnableEXT")),
+    .cmd_set_color_blend_equation_ext = reinterpret_cast<PFN_vkCmdSetColorBlendEquationEXT>(load_device_proc("vkCmdSetColorBlendEquationEXT")),
+    .cmd_set_color_write_mask_ext = reinterpret_cast<PFN_vkCmdSetColorWriteMaskEXT>(load_device_proc("vkCmdSetColorWriteMaskEXT")),
+    .cmd_set_rasterization_samples_ext = reinterpret_cast<PFN_vkCmdSetRasterizationSamplesEXT>(load_device_proc("vkCmdSetRasterizationSamplesEXT")),
+    .cmd_set_sample_mask_ext = reinterpret_cast<PFN_vkCmdSetSampleMaskEXT>(load_device_proc("vkCmdSetSampleMaskEXT")),
+    .cmd_set_alpha_to_coverage_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToCoverageEnableEXT>(load_device_proc("vkCmdSetAlphaToCoverageEnableEXT")),
+    .cmd_set_alpha_to_one_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToOneEnableEXT>(load_device_proc("vkCmdSetAlphaToOneEnableEXT")),
+  };
+  if (command_dispatch.cmd_bind_shaders_ext == nullptr || command_dispatch.cmd_set_logic_op_enable_ext == nullptr ||
+      command_dispatch.cmd_set_color_blend_enable_ext == nullptr || command_dispatch.cmd_set_color_blend_equation_ext == nullptr ||
+      command_dispatch.cmd_set_color_write_mask_ext == nullptr || command_dispatch.cmd_set_rasterization_samples_ext == nullptr ||
+      command_dispatch.cmd_set_sample_mask_ext == nullptr || command_dispatch.cmd_set_alpha_to_coverage_enable_ext == nullptr ||
+      command_dispatch.cmd_set_alpha_to_one_enable_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kMissingRequirement,
+                            "PassExecutor could not load required shader-object dynamic-state command pointers from vkGetDeviceProcAddr.");
   }
 
   const DeviceQueueTopology &topology = engine.device_queue_topology();
@@ -484,7 +531,7 @@ PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecuto
     transfer_queue_runtime_index,
     std::move(timeline_semaphore),
     info,
-    cmd_bind_shaders_ext,
+    command_dispatch,
   };
 }
 
@@ -1028,11 +1075,11 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       }
 
       command_buffer_handles[phase_index].beginRendering(rendering_info);
-      PassCommandEncoder encoder{command_buffer_handles[phase_index], phase.description.kind, cmd_bind_shaders_ext_};
+      PassCommandEncoder encoder{command_buffer_handles[phase_index], phase.description.kind, command_dispatch_};
       phase.record(encoder);
       command_buffer_handles[phase_index].endRendering();
     } else {
-      PassCommandEncoder encoder{command_buffer_handles[phase_index], phase.description.kind, cmd_bind_shaders_ext_};
+      PassCommandEncoder encoder{command_buffer_handles[phase_index], phase.description.kind, command_dispatch_};
       phase.record(encoder);
     }
 

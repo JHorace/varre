@@ -194,6 +194,30 @@ struct PassShaderBinding {
 };
 
 /**
+ * @brief Device-command dispatch table used by pass encoders.
+ */
+struct PassCommandDispatch {
+  /** @brief `vkCmdBindShadersEXT` function pointer. */
+  PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext = nullptr;
+  /** @brief `vkCmdSetLogicOpEnableEXT` function pointer. */
+  PFN_vkCmdSetLogicOpEnableEXT cmd_set_logic_op_enable_ext = nullptr;
+  /** @brief `vkCmdSetColorBlendEnableEXT` function pointer. */
+  PFN_vkCmdSetColorBlendEnableEXT cmd_set_color_blend_enable_ext = nullptr;
+  /** @brief `vkCmdSetColorBlendEquationEXT` function pointer. */
+  PFN_vkCmdSetColorBlendEquationEXT cmd_set_color_blend_equation_ext = nullptr;
+  /** @brief `vkCmdSetColorWriteMaskEXT` function pointer. */
+  PFN_vkCmdSetColorWriteMaskEXT cmd_set_color_write_mask_ext = nullptr;
+  /** @brief `vkCmdSetRasterizationSamplesEXT` function pointer. */
+  PFN_vkCmdSetRasterizationSamplesEXT cmd_set_rasterization_samples_ext = nullptr;
+  /** @brief `vkCmdSetSampleMaskEXT` function pointer. */
+  PFN_vkCmdSetSampleMaskEXT cmd_set_sample_mask_ext = nullptr;
+  /** @brief `vkCmdSetAlphaToCoverageEnableEXT` function pointer. */
+  PFN_vkCmdSetAlphaToCoverageEnableEXT cmd_set_alpha_to_coverage_enable_ext = nullptr;
+  /** @brief `vkCmdSetAlphaToOneEnableEXT` function pointer. */
+  PFN_vkCmdSetAlphaToOneEnableEXT cmd_set_alpha_to_one_enable_ext = nullptr;
+};
+
+/**
  * @brief Command encoder presented to one phase callback.
  */
 class PassCommandEncoder {
@@ -475,7 +499,7 @@ private:
   /**
    * @brief Internal constructor.
    */
-  PassCommandEncoder(vk::CommandBuffer command_buffer, PassPhaseKind phase_kind, PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext);
+  PassCommandEncoder(vk::CommandBuffer command_buffer, PassPhaseKind phase_kind, PassCommandDispatch command_dispatch);
 
   /**
    * @brief Validate phase kind for one command.
@@ -486,7 +510,7 @@ private:
 
   vk::CommandBuffer command_buffer_ = VK_NULL_HANDLE;
   PassPhaseKind phase_kind_ = PassPhaseKind::kGraphics;
-  PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext_ = nullptr;
+  PassCommandDispatch command_dispatch_{};
 };
 
 /**
@@ -664,7 +688,7 @@ private:
    */
   PassExecutor(const EngineContext *engine, const vk::raii::Device *device, std::vector<QueueRuntime> queue_runtimes, std::size_t graphics_queue_runtime_index,
                std::size_t async_compute_queue_runtime_index, std::size_t transfer_queue_runtime_index, vk::raii::Semaphore timeline_semaphore,
-               PassExecutorCreateInfo create_info, PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext);
+               PassExecutorCreateInfo create_info, PassCommandDispatch command_dispatch);
 
   /**
    * @brief Resolve queue runtime index from a queue kind.
@@ -682,7 +706,7 @@ private:
   vk::raii::Semaphore timeline_semaphore_{nullptr};
   std::uint64_t completed_timeline_value_ = 0U;
   PassExecutorCreateInfo create_info_{};
-  PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext_ = nullptr;
+  PassCommandDispatch command_dispatch_{};
 };
 
 } // namespace varre::engine
