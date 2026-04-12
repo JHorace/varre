@@ -93,7 +93,12 @@ struct PassImageAccess {
   /** @brief Image subresource range used for generated barriers. */
   vk::ImageSubresourceRange subresource_range =
     vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eColor).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
-  /** @brief Expected image layout during this phase usage. */
+  /**
+   * @brief Expected image layout during this phase usage.
+   *
+   * Pass scheduling assumes unified image layouts are enabled and treats
+   * non-present layouts as `eGeneral` for runtime transition emission.
+   */
   vk::ImageLayout layout = vk::ImageLayout::eGeneral;
   /** @brief Pipeline stage mask where this phase accesses the image. */
   vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;

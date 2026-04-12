@@ -32,6 +32,28 @@ namespace detail {
 }
 
 /**
+ * @brief Canonicalize pass-time image layouts under unified-layout assumptions.
+ * @param layout Image layout value.
+ * @return Canonical pass-time layout.
+ */
+[[nodiscard]] vk::ImageLayout canonical_pass_image_layout(const vk::ImageLayout layout) {
+  if (layout == vk::ImageLayout::eUndefined || layout == vk::ImageLayout::ePresentSrcKHR) {
+    return layout;
+  }
+  return vk::ImageLayout::eGeneral;
+}
+
+/**
+ * @brief Whether transitioning between two image layouts is required.
+ * @param old_layout Previous layout.
+ * @param new_layout Requested layout.
+ * @return `true` when a layout transition barrier is required.
+ */
+[[nodiscard]] bool layout_transition_required(const vk::ImageLayout old_layout, const vk::ImageLayout new_layout) {
+  return canonical_pass_image_layout(old_layout) != canonical_pass_image_layout(new_layout);
+}
+
+/**
  * @brief Validate engine profile requirements needed by pass-mode execution.
  * @param profile Resolved engine device profile.
  */
@@ -792,6 +814,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     }
 
     for (const PassImageAccess &image_access : phase.description.image_accesses) {
+      const vk::ImageLayout image_access_layout = detail::canonical_pass_image_layout(image_access.layout);
       if (image_access.resource_id == 0U) {
         throw make_engine_error(
           EngineErrorCode::kInvalidArgument,
@@ -810,7 +833,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                 fmt::format("Phase '{}' contains writable PassImageAccess for resource id {} with empty access_mask.", phase.description.name,
                                             image_access.resource_id));
       }
-      if (image_access.layout == vk::ImageLayout::eUndefined) {
+      if (image_access_layout == vk::ImageLayout::eUndefined) {
         throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with eUndefined layout.",
                                                                                phase.description.name, image_access.resource_id));
       }
@@ -845,14 +868,14 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         }
 
         const bool queue_changed = previous_state.queue_family_index != current_queue_family;
-        const bool layout_changed = previous_state.layout != image_access.layout;
+        const bool layout_changed = detail::layout_transition_required(previous_state.layout, image_access_layout);
         const bool needs_sync = previous_state.writes || image_access.writes || layout_changed;
         if (queue_changed || needs_sync) {
           detail::append_unique_dependency(&resolved_phases[phase_index].dependencies, previous_state.phase_index);
         }
 
         if (queue_changed) {
-          const vk::ImageLayout transfer_layout = layout_changed ? image_access.layout : previous_state.layout;
+          const vk::ImageLayout transfer_layout = layout_changed ? image_access_layout : previous_state.layout;
           resolved_phases[previous_state.phase_index].post_image_barriers.push_back(vk::ImageMemoryBarrier2{}
                                                                                       .setSrcStageMask(previous_state.stage_mask)
                                                                                       .setSrcAccessMask(previous_state.access_mask)
@@ -870,7 +893,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                       .setDstStageMask(image_access.stage_mask)
                                                                       .setDstAccessMask(image_access.access_mask)
                                                                       .setOldLayout(transfer_layout)
-                                                                      .setNewLayout(image_access.layout)
+                                                                      .setNewLayout(image_access_layout)
                                                                       .setSrcQueueFamilyIndex(previous_state.queue_family_index)
                                                                       .setDstQueueFamilyIndex(current_queue_family)
                                                                       .setImage(image_access.image)
@@ -882,7 +905,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                       .setDstStageMask(image_access.stage_mask)
                                                                       .setDstAccessMask(image_access.access_mask)
                                                                       .setOldLayout(previous_state.layout)
-                                                                      .setNewLayout(image_access.layout)
+                                                                      .setNewLayout(image_access_layout)
                                                                       .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                                                                       .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                                                                       .setImage(image_access.image)
@@ -895,7 +918,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         .queue_family_index = current_queue_family,
         .image = image_access.image,
         .subresource_range = image_access.subresource_range,
-        .layout = image_access.layout,
+        .layout = image_access_layout,
         .stage_mask = image_access.stage_mask,
         .access_mask = image_access.access_mask,
         .writes = image_access.writes,
@@ -952,15 +975,17 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     detail::emit_barriers(command_buffer_handles[phase_index], resolved_phase.pre_buffer_barriers, resolved_phase.pre_image_barriers);
 
     if (phase.description.kind == PassPhaseKind::kGraphics) {
-      const PassGraphicsRenderingInfo &rendering = *phase.description.graphics_rendering;
+        const PassGraphicsRenderingInfo &rendering = *phase.description.graphics_rendering;
       std::vector<vk::RenderingAttachmentInfo> color_attachments;
       color_attachments.reserve(rendering.color_attachments.size());
       for (const PassColorAttachmentDesc &color_attachment : rendering.color_attachments) {
+        const vk::ImageLayout color_attachment_layout = detail::canonical_pass_image_layout(color_attachment.image_layout);
+        const vk::ImageLayout resolve_image_layout = detail::canonical_pass_image_layout(color_attachment.resolve_image_layout);
         if (color_attachment.image_view == VK_NULL_HANDLE) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains color attachment with VK_NULL_HANDLE image_view.", phase.description.name));
         }
-        if (color_attachment.image_layout == vk::ImageLayout::eUndefined) {
+        if (color_attachment_layout == vk::ImageLayout::eUndefined) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains color attachment with eUndefined image_layout.", phase.description.name));
         }
@@ -980,19 +1005,19 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                   fmt::format("Graphics phase '{}' color attachment resolve_image_view/resolve_mode must either both be set or both be unset.",
                                               phase.description.name));
         }
-        if (has_resolve_view && color_attachment.resolve_image_layout == vk::ImageLayout::eUndefined) {
+        if (has_resolve_view && resolve_image_layout == vk::ImageLayout::eUndefined) {
           throw make_engine_error(
             EngineErrorCode::kInvalidArgument,
             fmt::format("Graphics phase '{}' color attachment resolve target uses eUndefined resolve_image_layout.", phase.description.name));
         }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(color_attachment.image_view)
-                                                        .setImageLayout(color_attachment.image_layout)
+                                                        .setImageLayout(color_attachment_layout)
                                                         .setLoadOp(color_attachment.load_op)
                                                         .setStoreOp(color_attachment.store_op)
                                                         .setResolveMode(color_attachment.resolve_mode)
                                                         .setResolveImageView(color_attachment.resolve_image_view)
-                                                        .setResolveImageLayout(color_attachment.resolve_image_layout);
+                                                        .setResolveImageLayout(resolve_image_layout);
         if (color_attachment.clear_value.has_value()) {
           attachment_info = attachment_info.setClearValue(*color_attachment.clear_value);
         }
@@ -1002,11 +1027,12 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       std::optional<vk::RenderingAttachmentInfo> depth_attachment_info;
       if (rendering.depth_attachment.has_value()) {
         const PassDepthAttachmentDesc &depth_attachment = *rendering.depth_attachment;
+        const vk::ImageLayout depth_attachment_layout = detail::canonical_pass_image_layout(depth_attachment.image_layout);
         if (depth_attachment.image_view == VK_NULL_HANDLE) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains depth attachment with VK_NULL_HANDLE image_view.", phase.description.name));
         }
-        if (depth_attachment.image_layout == vk::ImageLayout::eUndefined) {
+        if (depth_attachment_layout == vk::ImageLayout::eUndefined) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains depth attachment with eUndefined image_layout.", phase.description.name));
         }
@@ -1021,7 +1047,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(depth_attachment.image_view)
-                                                        .setImageLayout(depth_attachment.image_layout)
+                                                        .setImageLayout(depth_attachment_layout)
                                                         .setLoadOp(depth_attachment.load_op)
                                                         .setStoreOp(depth_attachment.store_op);
         if (depth_attachment.clear_value.has_value()) {
@@ -1033,11 +1059,12 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       std::optional<vk::RenderingAttachmentInfo> stencil_attachment_info;
       if (rendering.stencil_attachment.has_value()) {
         const PassDepthAttachmentDesc &stencil_attachment = *rendering.stencil_attachment;
+        const vk::ImageLayout stencil_attachment_layout = detail::canonical_pass_image_layout(stencil_attachment.image_layout);
         if (stencil_attachment.image_view == VK_NULL_HANDLE) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains stencil attachment with VK_NULL_HANDLE image_view.", phase.description.name));
         }
-        if (stencil_attachment.image_layout == vk::ImageLayout::eUndefined) {
+        if (stencil_attachment_layout == vk::ImageLayout::eUndefined) {
           throw make_engine_error(EngineErrorCode::kInvalidArgument,
                                   fmt::format("Graphics phase '{}' contains stencil attachment with eUndefined image_layout.", phase.description.name));
         }
@@ -1053,7 +1080,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         }
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(stencil_attachment.image_view)
-                                                        .setImageLayout(stencil_attachment.image_layout)
+                                                        .setImageLayout(stencil_attachment_layout)
                                                         .setLoadOp(stencil_attachment.load_op)
                                                         .setStoreOp(stencil_attachment.store_op);
         if (stencil_attachment.clear_value.has_value()) {

@@ -28,13 +28,18 @@ namespace {
 
   const auto feature_chain =
     physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
-                                 vk::PhysicalDeviceShaderObjectFeaturesEXT>();
+                                 vk::PhysicalDeviceShaderObjectFeaturesEXT, vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR>();
   const vk::PhysicalDeviceVulkan12Features &vulkan_12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
   const vk::PhysicalDeviceVulkan13Features &vulkan_13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
   const vk::PhysicalDeviceShaderObjectFeaturesEXT &shader_object_features = feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
+  const vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR &unified_image_layouts_features =
+    feature_chain.get<vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR>();
 
   if (!vulkan_12_features.timelineSemaphore) {
     missing_features->push_back("timelineSemaphore");
+  }
+  if (!unified_image_layouts_features.unifiedImageLayouts) {
+    missing_features->push_back("unifiedImageLayouts");
   }
   if (!vulkan_13_features.dynamicRendering) {
     missing_features->push_back("dynamicRendering");
@@ -116,6 +121,7 @@ DeviceProfileRequest build_device_profile_request(const EngineInitInfo &info) {
     append_unique(&request.required_extensions, extension);
   }
   append_unique(&request.required_extensions, VK_EXT_SHADER_OBJECT_EXTENSION_NAME);
+  append_unique(&request.required_extensions, VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME);
   return request;
 }
 
