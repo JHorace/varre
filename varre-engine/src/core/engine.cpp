@@ -75,10 +75,20 @@ EngineContext EngineContext::create(const EngineInitInfo &info) {
   const std::vector<const char *> enabled_device_extension_ptrs = detail::to_c_string_ptrs(selected_device.enabled_extensions);
   const std::vector<vk::DeviceQueueCreateInfo> queue_create_infos = detail::build_queue_create_infos(selected_device.queues.indices);
 
-  const vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo{}
-                                                    .setQueueCreateInfos(queue_create_infos)
-                                                    .setEnabledExtensionCount(static_cast<std::uint32_t>(enabled_device_extension_ptrs.size()))
-                                                    .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
+  vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo{}
+                                              .setQueueCreateInfos(queue_create_infos)
+                                              .setEnabledExtensionCount(static_cast<std::uint32_t>(enabled_device_extension_ptrs.size()))
+                                              .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
+
+  std::optional<vk::PhysicalDeviceFeatures2> device_features2;
+  std::optional<vk::PhysicalDeviceVulkan13Features> vulkan_13_features;
+  std::optional<vk::PhysicalDeviceShaderObjectFeaturesEXT> shader_object_features;
+  if (info.enable_pass_mode) {
+    shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT{}.setShaderObject(VK_TRUE);
+    vulkan_13_features = vk::PhysicalDeviceVulkan13Features{}.setPNext(&(*shader_object_features)).setDynamicRendering(VK_TRUE).setSynchronization2(VK_TRUE);
+    device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_13_features));
+    device_create_info = device_create_info.setPNext(&(*device_features2));
+  }
 
   vk::raii::Device device(physical_device, device_create_info);
 

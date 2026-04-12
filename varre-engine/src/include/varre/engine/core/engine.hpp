@@ -100,6 +100,18 @@ struct EngineInitInfo {
   bool require_async_compute = false;
   /** @brief Require a dedicated transfer queue family. */
   bool require_dedicated_transfer = false;
+  /**
+   * @brief Enable Pass Mode device requirements by default.
+   *
+   * When enabled, engine initialization requires and enables:
+   * - `VK_EXT_shader_object`
+   * - dynamic rendering
+   * - synchronization2
+   *
+   * For Vulkan API version < 1.3, dynamic rendering and synchronization2 are
+   * required through their KHR extension names.
+   */
+  bool enable_pass_mode = true;
   /** @brief Required Vulkan instance extension names. */
   std::vector<std::string> required_instance_extensions;
   /** @brief Required Vulkan instance layer names. */
