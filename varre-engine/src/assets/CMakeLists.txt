@@ -3,4 +3,5 @@ target_sources(
   PRIVATE
     models.cpp
     shaders.cpp
+    textures.cpp
 )
