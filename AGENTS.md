@@ -45,41 +45,54 @@ Convert `https://github.com/JHorace/vulkan-rust-engine` into a C++/CMake project
 - `varre-assets/models/tests` defines `varre_assets_models_tests` when `BUILD_TESTING=ON`.
   - Tests use Catch2 and may fetch it via `FetchContent` if not preinstalled.
 
-### `varre-engine` and `varre-app` status
-- Both are currently CMake structure scaffolds only.
-- Nested module trees are present to mirror Rust layout, but concrete targets are intentionally deferred.
-- Present placeholder paths include:
+### `varre-engine` status
+- `varre_engine` static library target is active and links `varre::engine_dependencies`.
+- Implemented modules:
+  - `core`: engine initialization, queue/device profile resolution, surface/swapchain primitives.
+  - `sync`: `FrameLoop` + upload context.
+  - `assets`: model upload, shader object cache, texture upload.
+  - `descriptors`: descriptor/pipeline-layout/material helpers.
+  - `render_context`: pass mode (`PassGraph`, `PassExecutor`) and `PassFrameLoop`.
+- Design baseline:
+  - Vulkan 1.3+ only.
+  - Dynamic rendering + synchronization2 + `VK_EXT_shader_object` first-class.
+  - No legacy `VkPipeline`/`VkRenderPass` fallback path.
+- Tests:
+  - `varre_engine_tests` target exists under `varre-engine/tests`.
+  - Covers queue/feature profile behavior, pass dependency/barrier flows, cross-queue timeline sync, shader/model integration, and swapchain recreate smoke path.
+- Still intentionally placeholder:
   - `varre-engine/src/geometry`
-  - `varre-engine/src/render_context/{triangle,mesh_simple}`
-  - `varre-app/src/{triangle,mesh_simple}`
+  - `varre-engine/src/render_context/{triangle,mesh_simple}` (app-level examples are no longer engine internals).
 
-## Engine Execution Plan (Current)
-Use this sequence when implementing `varre-engine` internals.
+### `varre-app` status
+- `varre-app` remains scaffolded (`triangle`, `mesh_simple` CMake placeholders).
+- Porting priority is now app migration on top of pass mode.
 
-1. Create `varre_engine` and wire it to `varre::engine_dependencies`.
-2. Define public engine API headers first (`Engine`, `DeviceContext`, `RenderContext`, config structs, error types).
-3. Port module structure from Rust with near 1:1 C++ mapping:
-   - `physical_device_utils`
-   - `extensions`
-   - `memory_utils`
-   - `command_buffers`
-   - `mesh_utils`
-   - `shader_utils`
-   - `render_context/triangle`
-   - `render_context/mesh_simple`
-   - window/surface provider abstraction (no direct SDL in engine)
-4. Implement instance creation with `vk::raii::Context` + `vk::raii::Instance`, validation toggles, and debug messenger.
-5. Implement physical-device selection and queue-family discovery.
-6. Implement logical device creation using Vulkan 1.3 + extension feature chains (`vk::StructureChain`).
-7. Implement per-frame state with RAII synchronization (`NUM_FRAMES_IN_FLIGHT = 3`).
-8. Implement command infrastructure (`vk::raii::CommandPool`, per-frame command buffers, one-time submit).
-9. Implement surface/swapchain path behind engine-facing platform interfaces.
-10. Port shader integration to `varre_assets` generated shader APIs.
-11. Port mesh/model upload integration to `varre_assets` models APIs + VMA-backed buffers/images.
-12. Port texture upload path (staging, transitions, view/sampler creation) with `stb_image`.
-13. Port render contexts in order: `triangle`, then `mesh_simple`.
-14. Add cleanup/lifetime checks and validation-friendly errors for swapchain recreation flows.
-15. Add tests for queue selection, feature-chain composition, shader/model lookup integration, and smoke initialization.
+## App Port Plan (Current Priority)
+Use this sequence for converting old Rust app targets.
+
+1. Lock architecture boundaries:
+   - Keep `varre-engine` window-system agnostic.
+   - Put SDL3 window/event loop + Vulkan surface creation in `varre-app`.
+2. Create shared `varre_app_core` runtime:
+   - SDL lifecycle.
+   - Vulkan instance extension query via SDL.
+   - SDL-created `VkSurfaceKHR` adoption into `SurfaceContext`.
+   - Engine/swapchain/`PassFrameLoop` bootstrap and shutdown.
+3. Define app-facing interfaces:
+   - Scene lifecycle hooks (`init`, `build_pass_graph`, `on_swapchain_recreated`, `on_event`, `shutdown`).
+   - Per-frame context describing swapchain image/view/extent/frame index.
+4. Wire real app targets:
+   - Convert `triangle` and `mesh_simple` into concrete executables.
+   - Link against `varre_engine`, `varre_assets`, and SDL3.
+5. Port `triangle` first as the pass-mode reference path.
+6. Port `mesh_simple` second with model upload dependency integration.
+7. Add ImGui-ready hooks now (no backend integration yet):
+   - Keep a no-op UI overlay interface to avoid future runtime refactors.
+8. Add app-level smoke coverage:
+   - startup/shutdown,
+   - resize/minimize/swapchain recreate behavior,
+   - extension/feature diagnostic paths.
 
 ### Planned Deviations / Improvements
 - Use `vk::raii` ownership consistently instead of manual destroy paths.
@@ -88,13 +101,15 @@ Use this sequence when implementing `varre-engine` internals.
 - Use `fmt`/`spdlog` for structured diagnostics.
 - Normalize extension/feature enablement via typed helper builders (`vk::StructureChain`).
 - Prefer explicit frame-context structs over hidden mutable synchronization state.
+- Keep SDL3 dependencies out of `varre-engine`.
+- Keep ImGui integration staged behind app-layer hooks.
 
-### Recommended Implementation Order
-1. Core init path: instance -> device -> queues -> command pool.
-2. Swapchain + frame-loop primitives.
-3. Assets integration (shaders/models/textures).
-4. Render contexts (`triangle`, then `mesh_simple`).
-5. Test hardening and resize/recreate edge cases.
+### Recommended Implementation Order (Apps)
+1. Implement `varre_app_core` + SDL3 surface/bootstrap path.
+2. Port `triangle` end-to-end with pass mode.
+3. Port `mesh_simple` on the same runtime.
+4. Add ImGui hook scaffolding (no renderer backend yet).
+5. Add app-level smoke tests and tighten recreate handling.
 
 ## Deferred Cleanup Plan
 - Post-app-migration engine structure/naming cleanup is recorded in `docs/post_app_migration_engine_cleanup.md`.
@@ -107,6 +122,8 @@ Use this sequence when implementing `varre-engine` internals.
 - Avoid introducing functionality for excluded targets.
 - Do not replace placeholder shader flow with real shader embedding until `shader_codegen` is intentionally implemented.
 - Do not implement legacy fallback paths (e.g., pre-1.3 compatibility modes) unless explicitly requested.
+- Do not add SDL3 or ImGui dependencies to `varre-engine`; keep those in `varre-app`.
+- New app rendering code should use pass mode (`PassGraph`/`PassExecutor`/`PassFrameLoop`) only.
 
 ## Build & Validation
 - Configure: `cmake -S . -B build`
@@ -116,6 +133,8 @@ Use this sequence when implementing `varre-engine` internals.
   - `cmake --build build --target model_codegen`
   - `cmake --build build --target varre_assets_models`
   - `cmake --build build --target varre_assets_shaders`
+  - `cmake --build build --target varre_engine`
+  - `cmake --build build --target varre_engine_tests`
 - Tests (when enabled): `ctest --test-dir build --output-on-failure`
 
 ## Formatting & Style
