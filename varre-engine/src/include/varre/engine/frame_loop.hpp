@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <vector>
 
@@ -194,6 +195,17 @@ public:
   [[nodiscard]] bool swapchain_recreation_required() const noexcept;
 
   /**
+   * @brief Defer destruction work until the current frame fence has completed.
+   * @param callback Deferred callback executed on frame completion.
+   */
+  void defer_release(std::function<void()> callback);
+
+  /**
+   * @brief Execute all deferred-release callbacks immediately after waiting for device idle.
+   */
+  void flush_deferred_releases();
+
+  /**
    * @brief Recreate and rebind the swapchain in one step.
    * @param swapchain Swapchain instance to recreate in place.
    * @param recreate_info Creation preferences for the new swapchain.
@@ -243,6 +255,12 @@ public:
 
 private:
   /**
+   * @brief Run deferred-release callbacks for one frame slot.
+   * @param frame_index Frame-slot index.
+   */
+  void run_deferred_releases_for_frame(std::uint32_t frame_index);
+
+  /**
    * @brief Internal constructor from pre-built synchronization resources.
    */
   FrameLoop(
@@ -263,6 +281,7 @@ private:
   bool frame_submitted_ = false;
   bool render_finished_signaled_ = false;
   bool swapchain_recreation_required_ = false;
+  std::vector<std::vector<std::function<void()>>> deferred_releases_;
 };
 
 } // namespace varre::engine

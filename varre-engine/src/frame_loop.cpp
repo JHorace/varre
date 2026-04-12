@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <ranges>
 #include <stdexcept>
 
 #include "varre/engine/engine.hpp"
@@ -41,6 +42,7 @@ namespace varre::engine {
       present_queue_(present_queue),
       frames_(std::move(frames)),
       image_in_flight_fences_(std::move(image_in_flight_fences)) {
+    deferred_releases_.resize(frames_.size());
   }
 
   FrameLoop FrameLoop::create(const EngineContext &engine, const SwapchainContext &swapchain, const FrameLoopCreateInfo &info) {
@@ -97,6 +99,7 @@ namespace varre::engine {
     if (in_flight_wait_result != vk::Result::eSuccess) {
       throw std::runtime_error("Timed out while waiting for the current frame fence.");
     }
+    run_deferred_releases_for_frame(current_frame_index_);
 
     try {
       const vk::ResultValue<std::uint32_t> acquire_result = swapchain.swapchain().acquireNextImage(timeout_ns, *frame.image_available, vk::Fence{});
@@ -238,11 +241,28 @@ namespace varre::engine {
 
   bool FrameLoop::swapchain_recreation_required() const noexcept { return swapchain_recreation_required_; }
 
+  void FrameLoop::defer_release(std::function<void()> callback) {
+    if (!callback) {
+      return;
+    }
+    deferred_releases_[current_frame_index_].push_back(std::move(callback));
+  }
+
+  void FrameLoop::flush_deferred_releases() {
+    if (device_ != nullptr) {
+      device_->waitIdle();
+    }
+    for (std::size_t frame_index = 0; frame_index < deferred_releases_.size(); ++frame_index) {
+      run_deferred_releases_for_frame(static_cast<std::uint32_t>(frame_index));
+    }
+  }
+
   void FrameLoop::recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info) {
     if (swapchain == nullptr) {
       throw std::runtime_error("FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
     }
     wait_idle();
+    flush_deferred_releases();
     *swapchain = swapchain->recreate(recreate_info);
     notify_swapchain_recreated(*swapchain);
   }
@@ -252,6 +272,7 @@ namespace varre::engine {
       throw std::runtime_error("FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
     }
     wait_idle();
+    flush_deferred_releases();
     *swapchain = swapchain->recreate();
     notify_swapchain_recreated(*swapchain);
   }
@@ -275,6 +296,17 @@ namespace varre::engine {
   void FrameLoop::wait_idle() const {
     if (device_ != nullptr) {
       device_->waitIdle();
+    }
+  }
+
+  void FrameLoop::run_deferred_releases_for_frame(const std::uint32_t frame_index) {
+    if (frame_index >= deferred_releases_.size()) {
+      return;
+    }
+    std::vector<std::function<void()>> callbacks = std::move(deferred_releases_[frame_index]);
+    deferred_releases_[frame_index].clear();
+    for (std::function<void()> &callback : callbacks) {
+      callback();
     }
   }
 

@@ -4,6 +4,7 @@ add_library(
   surface.cpp
   swapchain.cpp
   frame_loop.cpp
+  upload_context.cpp
 )
 add_library(varre::engine ALIAS varre_engine)
 
