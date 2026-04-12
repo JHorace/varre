@@ -2,17 +2,17 @@
  * @file frame_loop.cpp
  * @brief Frame-loop primitive implementation.
  */
-#include "varre/engine/frame_loop.hpp"
+#include "varre/engine/sync/frame_loop.hpp"
 
 #include <algorithm>
 #include <array>
 #include <ranges>
 
-#include "varre/engine/engine.hpp"
-#include "varre/engine/swapchain.hpp"
+#include "varre/engine/core/engine.hpp"
+#include "varre/engine/core/swapchain.hpp"
 
 namespace varre::engine {
-namespace {
+namespace detail {
 /**
  * @brief Append semaphore only when valid and not already present.
  * @param semaphores Destination semaphore list.
@@ -27,7 +27,7 @@ void append_unique_semaphore(std::vector<vk::Semaphore> *semaphores, const vk::S
     semaphores->push_back(semaphore);
   }
 }
-} // namespace
+} // namespace detail
 
 FrameLoop::FrameLoop(const vk::raii::Device *device, const vk::Queue graphics_queue, const vk::Queue present_queue, std::vector<FrameSyncPrimitives> &&frames,
                      std::vector<vk::Fence> &&image_in_flight_fences)
@@ -38,7 +38,7 @@ FrameLoop::FrameLoop(const vk::raii::Device *device, const vk::Queue graphics_qu
 
 FrameLoop FrameLoop::create(const EngineContext &engine, const SwapchainContext &swapchain, const FrameLoopCreateInfo &info) {
   const vk::raii::Device &device = engine.device();
-  const SurfaceQueueTopology &queue_topology = swapchain.queue_topology();
+  const SwapchainQueueTopology &queue_topology = swapchain.swapchain_queue_topology();
   std::uint32_t frame_count = info.frame_count == 0U ? swapchain.max_frames_in_flight() : info.frame_count;
   frame_count = std::clamp(frame_count, 1U, swapchain.image_count());
 
@@ -153,7 +153,7 @@ void FrameLoop::submit_graphics_batch(const GraphicsSubmitBatch &batch) {
 
   std::vector<vk::Semaphore> signal_semaphores = batch.signals;
   if (batch.signal_render_finished) {
-    append_unique_semaphore(&signal_semaphores, *frame.render_finished);
+    detail::append_unique_semaphore(&signal_semaphores, *frame.render_finished);
   }
 
   const vk::SubmitInfo submit_info = vk::SubmitInfo{}
@@ -197,7 +197,7 @@ PresentedFrame FrameLoop::present(const SwapchainContext &swapchain, const Frame
     if (!render_finished_signaled_) {
       throw make_engine_error(EngineErrorCode::kInvalidState, "present requested render-finished wait, but submit did not signal it for this frame.");
     }
-    append_unique_semaphore(&present_waits, *frame.render_finished);
+    detail::append_unique_semaphore(&present_waits, *frame.render_finished);
   }
   const vk::PresentInfoKHR present_info =
     vk::PresentInfoKHR{}.setWaitSemaphores(present_waits).setSwapchains(swapchain_handle).setImageIndices(request.image_index);
@@ -275,7 +275,7 @@ void FrameLoop::recreate_swapchain(SwapchainContext *swapchain) {
 }
 
 void FrameLoop::notify_swapchain_recreated(const SwapchainContext &swapchain) {
-  present_queue_ = swapchain.queue_topology().present_queue;
+  present_queue_ = swapchain.swapchain_queue_topology().present_queue;
   image_in_flight_fences_.assign(swapchain.image_count(), VK_NULL_HANDLE);
   frame_acquired_ = false;
   frame_submitted_ = false;

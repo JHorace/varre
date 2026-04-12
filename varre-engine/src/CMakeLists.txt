@@ -1,13 +1,4 @@
-add_library(
-  varre_engine STATIC
-  engine.cpp
-  surface.cpp
-  swapchain.cpp
-  frame_loop.cpp
-  descriptors.cpp
-  material_descriptors.cpp
-  upload_context.cpp
-)
+add_library(varre_engine STATIC)
 add_library(varre::engine ALIAS varre_engine)
 
 target_compile_features(varre_engine PUBLIC cxx_std_23)
@@ -19,5 +10,8 @@ target_include_directories(
 )
 
 # Engine source layout mirrors the Rust module structure.
+add_subdirectory(core)
+add_subdirectory(sync)
+add_subdirectory(descriptors)
 add_subdirectory(geometry)
 add_subdirectory(render_context)

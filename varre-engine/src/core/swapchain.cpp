@@ -2,7 +2,7 @@
  * @file swapchain.cpp
  * @brief Swapchain primitive implementation.
  */
-#include "varre/engine/swapchain.hpp"
+#include "varre/engine/core/swapchain.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,11 +12,11 @@
 
 #include <fmt/format.h>
 
-#include "varre/engine/engine.hpp"
-#include "varre/engine/surface.hpp"
+#include "varre/engine/core/engine.hpp"
+#include "varre/engine/core/surface.hpp"
 
 namespace varre::engine {
-namespace {
+namespace detail {
 /**
  * @brief Queue candidate that can potentially present to a surface.
  */
@@ -57,7 +57,7 @@ void append_unique_family_index(std::vector<std::uint32_t> *indices, const std::
  * @return Present-capable queue candidate.
  */
 QueueCandidate select_present_queue(const EngineContext &engine, const vk::SurfaceKHR surface) {
-  const QueueTopology &base_topology = engine.queue_topology();
+  const DeviceQueueTopology &base_topology = engine.device_queue_topology();
   std::vector<QueueCandidate> candidates;
   candidates.reserve(3U);
 
@@ -87,11 +87,11 @@ QueueCandidate select_present_queue(const EngineContext &engine, const vk::Surfa
  * @param surface Target window surface.
  * @return Queue topology including present and sharing details.
  */
-SurfaceQueueTopology resolve_surface_queue_topology(const EngineContext &engine, const vk::SurfaceKHR surface) {
-  const QueueTopology &base_topology = engine.queue_topology();
+SwapchainQueueTopology resolve_surface_queue_topology(const EngineContext &engine, const vk::SurfaceKHR surface) {
+  const DeviceQueueTopology &base_topology = engine.device_queue_topology();
   const QueueCandidate present_candidate = select_present_queue(engine, surface);
 
-  SurfaceQueueTopology queue_topology{
+  SwapchainQueueTopology queue_topology{
     .graphics_family_index = base_topology.families.graphics,
     .graphics_queue = base_topology.graphics_queue,
     .async_compute_family_index = base_topology.families.async_compute,
@@ -239,7 +239,7 @@ std::vector<vk::raii::ImageView> create_swapchain_image_views(const vk::raii::De
   return views;
 }
 
-} // namespace
+} // namespace detail
 
 SwapchainContext SwapchainContext::create_internal(const EngineContext &engine, const SurfaceContext &surface_context, const SwapchainCreateInfo &info,
                                                    const vk::SwapchainKHR old_swapchain) {
@@ -249,13 +249,13 @@ SwapchainContext SwapchainContext::create_internal(const EngineContext &engine, 
   const vk::SurfaceCapabilitiesKHR capabilities = physical_device.getSurfaceCapabilitiesKHR(surface);
   const std::vector<vk::SurfaceFormatKHR> available_formats = physical_device.getSurfaceFormatsKHR(surface);
   const std::vector<vk::PresentModeKHR> available_present_modes = physical_device.getSurfacePresentModesKHR(surface);
-  const SurfaceQueueTopology queue_topology = resolve_surface_queue_topology(engine, surface);
+  const SwapchainQueueTopology queue_topology = detail::resolve_surface_queue_topology(engine, surface);
 
-  const vk::SurfaceFormatKHR surface_format = select_surface_format(available_formats, info.preferred_format, info.preferred_color_space);
-  const vk::PresentModeKHR present_mode = select_present_mode(available_present_modes, info.preferred_present_mode);
-  const vk::Extent2D extent = select_extent(capabilities, info.preferred_extent);
-  const std::uint32_t image_count = select_image_count(capabilities);
-  const vk::CompositeAlphaFlagBitsKHR composite_alpha = select_composite_alpha(capabilities, info.composite_alpha);
+  const vk::SurfaceFormatKHR surface_format = detail::select_surface_format(available_formats, info.preferred_format, info.preferred_color_space);
+  const vk::PresentModeKHR present_mode = detail::select_present_mode(available_present_modes, info.preferred_present_mode);
+  const vk::Extent2D extent = detail::select_extent(capabilities, info.preferred_extent);
+  const std::uint32_t image_count = detail::select_image_count(capabilities);
+  const vk::CompositeAlphaFlagBitsKHR composite_alpha = detail::select_composite_alpha(capabilities, info.composite_alpha);
 
   if ((capabilities.supportedUsageFlags & info.image_usage) != info.image_usage) {
     throw make_engine_error(EngineErrorCode::kSurfaceUnsupported,
@@ -288,7 +288,7 @@ SwapchainContext SwapchainContext::create_internal(const EngineContext &engine, 
     throw make_engine_error(EngineErrorCode::kInvalidState, "Vulkan created a swapchain with zero images.");
   }
 
-  std::vector<vk::raii::ImageView> image_views = create_swapchain_image_views(engine.device(), images, surface_format.format);
+  std::vector<vk::raii::ImageView> image_views = detail::create_swapchain_image_views(engine.device(), images, surface_format.format);
   const std::uint32_t max_frames_in_flight = std::clamp(info.max_frames_in_flight, 1U, static_cast<std::uint32_t>(images.size()));
 
   return SwapchainContext{
@@ -311,11 +311,11 @@ SwapchainContext SwapchainContext::create_internal(const EngineContext &engine, 
 SwapchainContext::SwapchainContext(const EngineContext *engine, const SurfaceContext *surface_context, const vk::SurfaceKHR surface,
                                    vk::raii::SwapchainKHR &&swapchain, std::vector<vk::Image> &&images, std::vector<vk::raii::ImageView> &&image_views,
                                    const vk::Format image_format, const vk::ColorSpaceKHR color_space, const vk::Extent2D extent,
-                                   const vk::PresentModeKHR present_mode, const std::uint32_t max_frames_in_flight, SurfaceQueueTopology queue_topology,
+                                   const vk::PresentModeKHR present_mode, const std::uint32_t max_frames_in_flight, SwapchainQueueTopology queue_topology,
                                    SwapchainCreateInfo create_info)
     : engine_(engine), surface_context_(surface_context), surface_(surface), swapchain_(std::move(swapchain)), images_(std::move(images)),
       image_views_(std::move(image_views)), image_format_(image_format), color_space_(color_space), extent_(extent), present_mode_(present_mode),
-      max_frames_in_flight_(max_frames_in_flight), queue_topology_(std::move(queue_topology)), create_info_(std::move(create_info)) {}
+      max_frames_in_flight_(max_frames_in_flight), swapchain_queue_topology_(std::move(queue_topology)), create_info_(std::move(create_info)) {}
 
 SwapchainContext SwapchainContext::create(const EngineContext &engine, const SurfaceContext &surface_context, const SwapchainCreateInfo &info) {
   return create_internal(engine, surface_context, info, vk::SwapchainKHR{});
@@ -346,11 +346,13 @@ std::uint32_t SwapchainContext::image_count() const noexcept { return static_cas
 
 std::uint32_t SwapchainContext::max_frames_in_flight() const noexcept { return max_frames_in_flight_; }
 
-std::uint32_t SwapchainContext::present_queue_family_index() const noexcept { return queue_topology_.present_family_index; }
+std::uint32_t SwapchainContext::present_queue_family_index() const noexcept { return swapchain_queue_topology_.present_family_index; }
 
-vk::Queue SwapchainContext::present_queue() const noexcept { return queue_topology_.present_queue; }
+vk::Queue SwapchainContext::present_queue() const noexcept { return swapchain_queue_topology_.present_queue; }
 
-const SurfaceQueueTopology &SwapchainContext::queue_topology() const noexcept { return queue_topology_; }
+const SwapchainQueueTopology &SwapchainContext::swapchain_queue_topology() const noexcept { return swapchain_queue_topology_; }
+
+const SwapchainQueueTopology &SwapchainContext::queue_topology() const noexcept { return swapchain_queue_topology(); }
 
 std::span<const vk::Image> SwapchainContext::images() const noexcept { return images_; }
 
