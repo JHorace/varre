@@ -53,6 +53,34 @@ struct AcquiredFrame {
 };
 
 /**
+ * @brief One semaphore wait edge in a graphics submit batch.
+ */
+struct SubmitSemaphoreWait {
+  /** @brief Semaphore handle to wait on. */
+  vk::Semaphore semaphore = VK_NULL_HANDLE;
+  /** @brief Pipeline stage mask used for this wait edge. */
+  vk::PipelineStageFlags stage_mask = vk::PipelineStageFlagBits::eAllCommands;
+};
+
+/**
+ * @brief Lightweight graphics submission batch.
+ */
+struct GraphicsSubmitBatch {
+  /** @brief Additional semaphores to wait on before executing command buffers. */
+  std::vector<SubmitSemaphoreWait> waits;
+  /** @brief Command buffers submitted in-order on the graphics queue. */
+  std::vector<vk::CommandBuffer> command_buffers;
+  /** @brief Additional semaphores to signal when submit completes. */
+  std::vector<vk::Semaphore> signals;
+  /** @brief Include the frame's image-available semaphore as an automatic wait edge. */
+  bool wait_for_swapchain_image = true;
+  /** @brief Stage mask used when @ref wait_for_swapchain_image is true. */
+  vk::PipelineStageFlags swapchain_image_wait_stage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+  /** @brief Include the frame's render-finished semaphore as an automatic signal edge. */
+  bool signal_render_finished = true;
+};
+
+/**
  * @brief Result classification for presentation.
  */
 enum class FramePresentStatus {
@@ -62,6 +90,18 @@ enum class FramePresentStatus {
   kSuboptimal,
   /** @brief Presentation failed because the swapchain is out of date. */
   kOutOfDate,
+};
+
+/**
+ * @brief Presentation request with optional custom wait semaphores.
+ */
+struct FramePresentRequest {
+  /** @brief Swapchain image index to present. */
+  std::uint32_t image_index = 0U;
+  /** @brief Additional semaphores to wait on before queue present. */
+  std::vector<vk::Semaphore> wait_semaphores;
+  /** @brief Include the frame's render-finished semaphore in wait set. */
+  bool include_render_finished = true;
 };
 
 /**
@@ -119,6 +159,12 @@ public:
   );
 
   /**
+   * @brief Submit a graphics workload batch for the current frame.
+   * @param batch Submit batch description.
+   */
+  void submit_graphics_batch(const GraphicsSubmitBatch &batch);
+
+  /**
    * @brief Submit one command buffer on the graphics queue for the current frame.
    * @param command_buffer Recorded command buffer to submit.
    * @param wait_stage_mask Pipeline stage to wait on `image_available`.
@@ -127,6 +173,14 @@ public:
 
   /**
    * @brief Present one swapchain image for the current frame.
+   * @param swapchain Active swapchain context.
+   * @param image_index Image index returned by @ref acquire_next_image.
+   * @return Presentation status.
+   */
+  [[nodiscard]] FramePresentStatus present(const SwapchainContext &swapchain, const FramePresentRequest &request);
+
+  /**
+   * @brief Present one swapchain image for the current frame using default waits.
    * @param swapchain Active swapchain context.
    * @param image_index Image index returned by @ref acquire_next_image.
    * @return Presentation status.
@@ -206,6 +260,8 @@ private:
   std::vector<vk::Fence> image_in_flight_fences_;
   std::uint32_t current_frame_index_ = 0U;
   bool frame_acquired_ = false;
+  bool frame_submitted_ = false;
+  bool render_finished_signaled_ = false;
   bool swapchain_recreation_required_ = false;
 };
 

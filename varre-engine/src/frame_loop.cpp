@@ -12,6 +12,23 @@
 #include "varre/engine/swapchain.hpp"
 
 namespace varre::engine {
+  namespace {
+    /**
+     * @brief Append semaphore only when valid and not already present.
+     * @param semaphores Destination semaphore list.
+     * @param semaphore Semaphore to append.
+     */
+    void append_unique_semaphore(std::vector<vk::Semaphore> *semaphores, const vk::Semaphore semaphore) {
+      if (semaphore == VK_NULL_HANDLE) {
+        return;
+      }
+      const bool exists = std::ranges::any_of(*semaphores, [&](const vk::Semaphore value) { return value == semaphore; });
+      if (!exists) {
+        semaphores->push_back(semaphore);
+      }
+    }
+  } // namespace
+
   FrameLoop::FrameLoop(
       const vk::raii::Device *device,
       const vk::Queue graphics_queue,
@@ -71,6 +88,8 @@ namespace varre::engine {
         .frame_index = current_frame_index_,
         .image_index = 0U,
     };
+    frame_submitted_ = false;
+    render_finished_signaled_ = false;
 
     FrameSyncPrimitives &frame = frames_[current_frame_index_];
     const std::array in_flight_fence{*frame.in_flight};
@@ -109,34 +128,81 @@ namespace varre::engine {
     return result;
   }
 
-  void FrameLoop::submit_graphics(const vk::CommandBuffer command_buffer, const vk::PipelineStageFlags wait_stage_mask) {
+  void FrameLoop::submit_graphics_batch(const GraphicsSubmitBatch &batch) {
     if (!frame_acquired_) {
-      throw std::runtime_error("submit_graphics called before acquire_next_image.");
+      throw std::runtime_error("submit_graphics_batch called before acquire_next_image.");
+    }
+
+    std::vector<vk::Semaphore> wait_semaphores;
+    std::vector<vk::PipelineStageFlags> wait_stage_masks;
+    wait_semaphores.reserve(batch.waits.size() + (batch.wait_for_swapchain_image ? 1U : 0U));
+    wait_stage_masks.reserve(wait_semaphores.capacity());
+    for (const SubmitSemaphoreWait &wait : batch.waits) {
+      if (wait.semaphore == VK_NULL_HANDLE) {
+        continue;
+      }
+      wait_semaphores.push_back(wait.semaphore);
+      wait_stage_masks.push_back(wait.stage_mask);
     }
 
     const FrameSyncPrimitives &frame = frames_[current_frame_index_];
+    if (batch.wait_for_swapchain_image) {
+      wait_semaphores.push_back(*frame.image_available);
+      wait_stage_masks.push_back(batch.swapchain_image_wait_stage);
+    }
+
+    std::vector<vk::Semaphore> signal_semaphores = batch.signals;
+    if (batch.signal_render_finished) {
+      append_unique_semaphore(&signal_semaphores, *frame.render_finished);
+    }
+
     const vk::SubmitInfo submit_info = vk::SubmitInfo{}
-        .setWaitSemaphores(*frame.image_available)
-        .setWaitDstStageMask(wait_stage_mask)
-        .setCommandBuffers(command_buffer)
-        .setSignalSemaphores(*frame.render_finished);
+        .setWaitSemaphores(wait_semaphores)
+        .setWaitDstStageMask(wait_stage_masks)
+        .setCommandBuffers(batch.command_buffers)
+        .setSignalSemaphores(signal_semaphores);
     graphics_queue_.submit(submit_info, *frame.in_flight);
+
+    frame_submitted_ = true;
+    render_finished_signaled_ = batch.signal_render_finished;
   }
 
-  FramePresentStatus FrameLoop::present(const SwapchainContext &swapchain, const std::uint32_t image_index) {
+  void FrameLoop::submit_graphics(const vk::CommandBuffer command_buffer, const vk::PipelineStageFlags wait_stage_mask) {
+    GraphicsSubmitBatch batch{
+      .waits = {},
+      .command_buffers = {command_buffer},
+      .signals = {},
+      .wait_for_swapchain_image = true,
+      .swapchain_image_wait_stage = wait_stage_mask,
+      .signal_render_finished = true,
+    };
+    submit_graphics_batch(batch);
+  }
+
+  FramePresentStatus FrameLoop::present(const SwapchainContext &swapchain, const FramePresentRequest &request) {
     if (!frame_acquired_) {
       throw std::runtime_error("present called before acquire_next_image.");
     }
-    if (image_index >= swapchain.image_count()) {
+    if (!frame_submitted_) {
+      throw std::runtime_error("present called before submitting graphics work.");
+    }
+    if (request.image_index >= swapchain.image_count()) {
       throw std::runtime_error("present called with an out-of-range swapchain image index.");
     }
 
     const FrameSyncPrimitives &frame = frames_[current_frame_index_];
     const vk::SwapchainKHR swapchain_handle = *swapchain.swapchain();
+    std::vector<vk::Semaphore> present_waits = request.wait_semaphores;
+    if (request.include_render_finished) {
+      if (!render_finished_signaled_) {
+        throw std::runtime_error("present requested render-finished wait, but submit did not signal it for this frame.");
+      }
+      append_unique_semaphore(&present_waits, *frame.render_finished);
+    }
     const vk::PresentInfoKHR present_info = vk::PresentInfoKHR{}
-        .setWaitSemaphores(*frame.render_finished)
+        .setWaitSemaphores(present_waits)
         .setSwapchains(swapchain_handle)
-        .setImageIndices(image_index);
+        .setImageIndices(request.image_index);
 
     FramePresentStatus status = FramePresentStatus::kSuccess;
     try {
@@ -153,8 +219,21 @@ namespace varre::engine {
     }
 
     frame_acquired_ = false;
+    frame_submitted_ = false;
+    render_finished_signaled_ = false;
     current_frame_index_ = (current_frame_index_ + 1U) % static_cast<std::uint32_t>(frames_.size());
     return status;
+  }
+
+  FramePresentStatus FrameLoop::present(const SwapchainContext &swapchain, const std::uint32_t image_index) {
+    return present(
+        swapchain,
+        FramePresentRequest{
+          .image_index = image_index,
+          .wait_semaphores = {},
+          .include_render_finished = true,
+        }
+    );
   }
 
   bool FrameLoop::swapchain_recreation_required() const noexcept { return swapchain_recreation_required_; }
@@ -181,6 +260,8 @@ namespace varre::engine {
     present_queue_ = swapchain.queue_topology().present_queue;
     image_in_flight_fences_.assign(swapchain.image_count(), VK_NULL_HANDLE);
     frame_acquired_ = false;
+    frame_submitted_ = false;
+    render_finished_signaled_ = false;
     swapchain_recreation_required_ = false;
     if (current_frame_index_ >= frames_.size()) {
       current_frame_index_ = 0U;
