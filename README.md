@@ -13,6 +13,8 @@ This repository is being built using **guided AI generation**:
 - Establish CMake target layout first, then fill internals.
 - Keep unfinished work as explicit stubs instead of implicit partial behavior.
 - Maintain deterministic code generation paths for assets.
+- Target Vulkan runtime baseline: **1.3+ only**.
+- Pre-1.3 runtime compatibility is intentionally out of scope.
 
 ## Current Status
 
@@ -50,6 +52,7 @@ Explicit design choices for the port:
 - Use VMA for memory allocation from first engine implementation.
 - Use structured diagnostics (`fmt`/`spdlog`) rather than ad hoc prints.
 - Keep unfinished components as explicit stubs.
+- Use dynamic rendering + synchronization2 + `VK_EXT_shader_object` as first-class requirements (no legacy pipeline/renderpass fallback path).
 
 ### Explicitly Not Implemented Yet
 

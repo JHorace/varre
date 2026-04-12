@@ -9,6 +9,12 @@ Convert `https://github.com/JHorace/vulkan-rust-engine` into a C++/CMake project
 ## Explicit Exclusions
 - Do not convert or implement `varre-iced-renderer` yet.
 - Do not convert or implement the `hello_iced` application target yet.
+- Do not add compatibility/fallback paths for Vulkan runtimes below 1.3.
+
+## Runtime Baseline
+- Vulkan **1.3+ only**.
+- Engine/runtime design assumes dynamic rendering, synchronization2, and shader objects.
+- Pre-1.3 runtime support is intentionally out of scope.
 
 ## Current Project State (Actual)
 - Top-level CMake project `varre` with conditional subprojects:
@@ -96,6 +102,7 @@ Use this sequence when implementing `varre-engine` internals.
 - Keep placeholder/stub behavior explicit for unfinished components.
 - Avoid introducing functionality for excluded targets.
 - Do not replace placeholder shader flow with real shader embedding until `shader_codegen` is intentionally implemented.
+- Do not implement legacy fallback paths (e.g., pre-1.3 compatibility modes) unless explicitly requested.
 
 ## Build & Validation
 - Configure: `cmake -S . -B build`
