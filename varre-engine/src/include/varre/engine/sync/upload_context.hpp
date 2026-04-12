@@ -12,6 +12,8 @@
 
 #include <vulkan/vulkan_raii.hpp>
 
+#include "varre/engine/render/pass_mode.hpp"
+
 namespace varre::engine {
 
 class EngineContext;
@@ -53,6 +55,18 @@ struct UploadBufferRequest {
 };
 
 /**
+ * @brief Dependency token produced by asynchronous upload submissions.
+ */
+struct UploadDependencyToken {
+  /** @brief Timeline semaphore signaled by upload completion. */
+  vk::Semaphore semaphore = VK_NULL_HANDLE;
+  /** @brief Timeline value signaled at completion. */
+  std::uint64_t value = 0U;
+  /** @brief Recommended stage mask for waiting before resource usage. */
+  vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
+};
+
+/**
  * @brief Upload path that stages host data and submits copy work to transfer/graphics queues.
  */
 class UploadContext {
@@ -75,6 +89,11 @@ public:
   [[nodiscard]] static UploadContext create(const EngineContext &engine, const UploadContextCreateInfo &info = {});
 
   /**
+   * @brief Destroy upload context after draining outstanding GPU work.
+   */
+  ~UploadContext();
+
+  /**
    * @brief Move-construct upload context.
    * @param other Context being moved from.
    */
@@ -91,10 +110,23 @@ public:
   UploadContext &operator=(const UploadContext &) = delete;
 
   /**
+   * @brief Upload bytes asynchronously into a destination buffer.
+   * @param request Upload request.
+   * @return Completion token that can be consumed by pass-mode waits.
+   */
+  [[nodiscard]] UploadDependencyToken upload_buffer_async(const UploadBufferRequest &request);
+
+  /**
    * @brief Upload bytes into a destination buffer using an internal staging allocation.
    * @param request Upload request.
    */
   void upload_buffer(const UploadBufferRequest &request);
+
+  /**
+   * @brief Wait until one upload dependency token is complete.
+   * @param token Upload completion token.
+   */
+  void wait(const UploadDependencyToken &token);
 
   /**
    * @brief Wait until all device queues are idle.
@@ -118,7 +150,24 @@ private:
    * @brief Internal constructor from prebuilt queue resources.
    */
   UploadContext(const EngineContext *engine, const vk::raii::Device *device, const vk::raii::PhysicalDevice *physical_device,
-                std::vector<QueueResources> &&queue_resources, std::uint32_t submission_queue_family_index, vk::Queue submission_queue);
+                std::vector<QueueResources> &&queue_resources, std::uint32_t submission_queue_family_index, vk::Queue submission_queue,
+                vk::raii::Semaphore &&timeline_semaphore);
+
+  /**
+   * @brief In-flight upload resources retained until timeline completion.
+   */
+  struct InFlightUpload {
+    std::uint64_t completion_value = 0U;
+    vk::raii::Buffer staging_buffer{nullptr};
+    vk::raii::DeviceMemory staging_memory{nullptr};
+    std::vector<vk::raii::CommandBuffer> submission_command_buffers;
+    std::vector<vk::raii::CommandBuffer> destination_command_buffers;
+  };
+
+  /**
+   * @brief Discard completed in-flight upload resources.
+   */
+  void collect_completed_uploads();
 
   /**
    * @brief Find queue resources for one queue family.
@@ -140,12 +189,34 @@ private:
   std::vector<QueueResources> queue_resources_;
   std::uint32_t submission_queue_family_index_ = 0U;
   vk::Queue submission_queue_ = VK_NULL_HANDLE;
+  vk::raii::Semaphore timeline_semaphore_{nullptr};
+  std::uint64_t next_timeline_value_ = 0U;
+  std::vector<InFlightUpload> in_flight_uploads_;
 };
+
+/**
+ * @brief Convert one upload dependency token into a pass-execution wait edge.
+ * @param phase_id Target phase identifier.
+ * @param token Upload dependency token.
+ * @return External wait edge for pass execution.
+ */
+[[nodiscard]] PassExternalWait make_upload_dependency_wait(PassPhaseId phase_id, const UploadDependencyToken &token);
+
+/**
+ * @brief Append one upload dependency wait edge to pass execution info.
+ * @param execution_info Destination pass execution info.
+ * @param phase_id Target phase identifier.
+ * @param token Upload dependency token.
+ */
+void append_upload_dependency_wait(PassExecutionInfo *execution_info, PassPhaseId phase_id, const UploadDependencyToken &token);
 
 } // namespace varre::engine
 
 namespace varre::engine::sync {
+using ::varre::engine::append_upload_dependency_wait;
+using ::varre::engine::make_upload_dependency_wait;
 using ::varre::engine::UploadBufferRequest;
 using ::varre::engine::UploadContext;
 using ::varre::engine::UploadContextCreateInfo;
+using ::varre::engine::UploadDependencyToken;
 } // namespace varre::engine::sync

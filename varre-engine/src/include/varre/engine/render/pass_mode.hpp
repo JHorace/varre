@@ -423,6 +423,12 @@ struct PassExternalWait {
   PassPhaseId phase_id = 0U;
   /** @brief Semaphore to wait on. */
   vk::Semaphore semaphore = VK_NULL_HANDLE;
+  /**
+   * @brief Semaphore wait value.
+   *
+   * Use `0` for binary semaphores. Use a timeline value for timeline semaphores.
+   */
+  std::uint64_t value = 0U;
   /** @brief Stage mask used for the wait edge. */
   vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
 };
@@ -435,6 +441,12 @@ struct PassExternalSignal {
   PassPhaseId phase_id = 0U;
   /** @brief Semaphore to signal. */
   vk::Semaphore semaphore = VK_NULL_HANDLE;
+  /**
+   * @brief Semaphore signal value.
+   *
+   * Use `0` for binary semaphores. Use a timeline value for timeline semaphores.
+   */
+  std::uint64_t value = 0U;
   /** @brief Stage mask used for the signal edge. */
   vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
 };

@@ -40,8 +40,7 @@ void throw_on_vma_error(const VkResult result, const std::string_view context) {
  */
 [[nodiscard]] std::uint32_t checked_u32(const std::size_t value, const std::string_view context) {
   if (value > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
-    throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                            fmt::format("{} exceeds uint32_t range ({}).", context, static_cast<unsigned long long>(value)));
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("{} exceeds uint32_t range ({}).", context, static_cast<unsigned long long>(value)));
   }
   return static_cast<std::uint32_t>(value);
 }
@@ -104,12 +103,13 @@ ModelUploadService::~ModelUploadService() {
   }
   cached_meshes_.clear();
   cached_ids_.clear();
+  cached_upload_dependencies_.clear();
   release_allocator();
 }
 
 ModelUploadService::ModelUploadService(ModelUploadService &&other) noexcept
-    : engine_(other.engine_), upload_context_(std::move(other.upload_context_)), allocator_(other.allocator_),
-      cached_ids_(std::move(other.cached_ids_)), cached_meshes_(std::move(other.cached_meshes_)) {
+    : engine_(other.engine_), upload_context_(std::move(other.upload_context_)), allocator_(other.allocator_), cached_ids_(std::move(other.cached_ids_)),
+      cached_meshes_(std::move(other.cached_meshes_)), cached_upload_dependencies_(std::move(other.cached_upload_dependencies_)) {
   other.engine_ = nullptr;
   other.allocator_ = nullptr;
 }
@@ -126,6 +126,7 @@ ModelUploadService &ModelUploadService::operator=(ModelUploadService &&other) no
   allocator_ = other.allocator_;
   cached_ids_ = std::move(other.cached_ids_);
   cached_meshes_ = std::move(other.cached_meshes_);
+  cached_upload_dependencies_ = std::move(other.cached_upload_dependencies_);
   other.engine_ = nullptr;
   other.allocator_ = nullptr;
   return *this;
@@ -133,8 +134,8 @@ ModelUploadService &ModelUploadService::operator=(ModelUploadService &&other) no
 
 ModelUploadService ModelUploadService::create(const EngineContext &engine, const ModelUploadCreateInfo &info) {
   UploadContext upload_context = UploadContext::create(engine, UploadContextCreateInfo{
-                                                         .prefer_transfer_queue = info.prefer_transfer_queue,
-                                                       });
+                                                                 .prefer_transfer_queue = info.prefer_transfer_queue,
+                                                               });
 
   VmaAllocatorCreateInfo allocator_create_info{};
   allocator_create_info.instance = static_cast<VkInstance>(*engine.instance());
@@ -154,8 +155,21 @@ ModelUploadService ModelUploadService::create(const EngineContext &engine, const
 }
 
 const GpuMesh &ModelUploadService::get_or_upload(const varre::assets::ModelId model_id) {
+  std::vector<UploadDependencyToken> dependencies;
+  const GpuMesh &mesh = get_or_upload_with_dependencies(model_id, &dependencies);
+  for (const UploadDependencyToken &token : dependencies) {
+    upload_context_.wait(token);
+  }
+  return mesh;
+}
+
+const GpuMesh &ModelUploadService::get_or_upload_with_dependencies(const varre::assets::ModelId model_id,
+                                                                   std::vector<UploadDependencyToken> *out_dependencies) {
   const std::size_t existing_index = find_cached_index(model_id);
   if (existing_index != cached_ids_.size()) {
+    if (out_dependencies != nullptr) {
+      *out_dependencies = cached_upload_dependencies_[existing_index];
+    }
     return cached_meshes_[existing_index];
   }
 
@@ -165,14 +179,21 @@ const GpuMesh &ModelUploadService::get_or_upload(const varre::assets::ModelId mo
   } catch (const EngineError &) {
     throw;
   } catch (const std::exception &error) {
-    throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                            fmt::format("Failed to load model '{}' (id={}): {}", varre::assets::model_name(model_id),
-                                        static_cast<std::uint32_t>(model_id), error.what()));
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Failed to load model '{}' (id={}): {}", varre::assets::model_name(model_id),
+                                                                           static_cast<std::uint32_t>(model_id), error.what()));
   }
-  return upload_and_cache(model);
+  return upload_and_cache_with_dependencies(model, out_dependencies);
 }
 
 GpuMesh ModelUploadService::upload(const varre::assets::ModelAsset &model) {
+  GpuMeshUploadResult result = upload_with_dependencies(model);
+  for (const UploadDependencyToken &token : result.upload_dependencies) {
+    upload_context_.wait(token);
+  }
+  return std::move(result.mesh);
+}
+
+GpuMeshUploadResult ModelUploadService::upload_with_dependencies(const varre::assets::ModelAsset &model) {
   if (engine_ == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "ModelUploadService is not initialized.");
   }
@@ -186,21 +207,21 @@ GpuMesh ModelUploadService::upload(const varre::assets::ModelAsset &model) {
 
   const std::span<const varre::assets::Vertex> vertex_span{model.vertices.data(), model.vertices.size()};
   const std::span<const std::byte> vertex_bytes = std::as_bytes(vertex_span);
-  GpuBuffer vertex_buffer = create_device_local_buffer(
-    static_cast<vk::DeviceSize>(vertex_bytes.size_bytes()),
-    vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer);
+  GpuBuffer vertex_buffer = create_device_local_buffer(static_cast<vk::DeviceSize>(vertex_bytes.size_bytes()),
+                                                       vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eVertexBuffer);
 
-  upload_bytes_to_buffer(vertex_buffer, vertex_bytes, vk::AccessFlagBits2::eVertexAttributeRead);
+  std::vector<UploadDependencyToken> upload_dependencies;
+  upload_dependencies.reserve(2U);
+  upload_dependencies.push_back(upload_bytes_to_buffer(vertex_buffer, vertex_bytes, vk::AccessFlagBits2::eVertexAttributeRead));
 
   GpuBuffer index_buffer{};
   std::uint32_t index_count = 0U;
   if (!model.indices.empty()) {
     const std::span<const std::uint32_t> index_span{model.indices.data(), model.indices.size()};
     const std::span<const std::byte> index_bytes = std::as_bytes(index_span);
-    index_buffer = create_device_local_buffer(
-      static_cast<vk::DeviceSize>(index_bytes.size_bytes()),
-      vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer);
-    upload_bytes_to_buffer(index_buffer, index_bytes, vk::AccessFlagBits2::eIndexRead);
+    index_buffer = create_device_local_buffer(static_cast<vk::DeviceSize>(index_bytes.size_bytes()),
+                                              vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndexBuffer);
+    upload_dependencies.push_back(upload_bytes_to_buffer(index_buffer, index_bytes, vk::AccessFlagBits2::eIndexRead));
     index_count = detail::checked_u32(model.indices.size(), "Model index count");
   }
 
@@ -211,16 +232,38 @@ GpuMesh ModelUploadService::upload(const varre::assets::ModelAsset &model) {
   mesh.vertex_count = detail::checked_u32(model.vertices.size(), "Model vertex count");
   mesh.index_count = index_count;
   mesh.index_type = vk::IndexType::eUint32;
-  return mesh;
+  return GpuMeshUploadResult{
+    .mesh = std::move(mesh),
+    .upload_dependencies = std::move(upload_dependencies),
+  };
 }
 
 const GpuMesh &ModelUploadService::upload_and_cache(const varre::assets::ModelAsset &model) {
+  std::vector<UploadDependencyToken> dependencies;
+  const GpuMesh &mesh = upload_and_cache_with_dependencies(model, &dependencies);
+  for (const UploadDependencyToken &token : dependencies) {
+    upload_context_.wait(token);
+  }
+  return mesh;
+}
+
+const GpuMesh &ModelUploadService::upload_and_cache_with_dependencies(const varre::assets::ModelAsset &model,
+                                                                      std::vector<UploadDependencyToken> *out_dependencies) {
   const std::size_t existing_index = find_cached_index(model.id);
   if (existing_index != cached_ids_.size()) {
+    if (out_dependencies != nullptr) {
+      *out_dependencies = cached_upload_dependencies_[existing_index];
+    }
     return cached_meshes_[existing_index];
   }
+
+  GpuMeshUploadResult result = upload_with_dependencies(model);
   cached_ids_.push_back(model.id);
-  cached_meshes_.push_back(upload(model));
+  cached_meshes_.push_back(std::move(result.mesh));
+  cached_upload_dependencies_.push_back(std::move(result.upload_dependencies));
+  if (out_dependencies != nullptr) {
+    *out_dependencies = cached_upload_dependencies_.back();
+  }
   return cached_meshes_.back();
 }
 
@@ -228,11 +271,13 @@ void ModelUploadService::clear() {
   if (allocator_ == nullptr) {
     cached_meshes_.clear();
     cached_ids_.clear();
+    cached_upload_dependencies_.clear();
     return;
   }
   wait_idle();
   cached_meshes_.clear();
   cached_ids_.clear();
+  cached_upload_dependencies_.clear();
 }
 
 void ModelUploadService::wait_idle() const { upload_context_.wait_idle(); }
@@ -276,17 +321,17 @@ GpuBuffer ModelUploadService::create_device_local_buffer(const vk::DeviceSize si
   };
 }
 
-void ModelUploadService::upload_bytes_to_buffer(const GpuBuffer &destination, const std::span<const std::byte> data,
-                                                const vk::AccessFlags2 destination_access_mask) {
+UploadDependencyToken ModelUploadService::upload_bytes_to_buffer(const GpuBuffer &destination, const std::span<const std::byte> data,
+                                                                 const vk::AccessFlags2 destination_access_mask) {
   if (!destination.valid()) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "upload_bytes_to_buffer requires a valid destination buffer.");
   }
   if (data.empty()) {
-    return;
+    return UploadDependencyToken{};
   }
 
   try {
-    upload_context_.upload_buffer(UploadBufferRequest{
+    return upload_context_.upload_buffer_async(UploadBufferRequest{
       .destination_buffer = destination.buffer(),
       .destination_offset = 0U,
       .source_data = data,
@@ -298,6 +343,23 @@ void ModelUploadService::upload_bytes_to_buffer(const GpuBuffer &destination, co
     throw;
   } catch (const std::exception &error) {
     throw make_engine_error(EngineErrorCode::kInvalidState, fmt::format("Model buffer upload failed: {}", error.what()));
+  }
+}
+
+void ModelUploadService::append_upload_dependency_waits(PassExecutionInfo *execution_info, const PassPhaseId phase_id,
+                                                        const varre::assets::ModelId model_id) const {
+  if (execution_info == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "append_upload_dependency_waits requires a non-null execution_info.");
+  }
+
+  const std::size_t index = find_cached_index(model_id);
+  if (index == cached_ids_.size()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("append_upload_dependency_waits could not find cached model id {}.", static_cast<std::uint32_t>(model_id)));
+  }
+
+  for (const UploadDependencyToken &token : cached_upload_dependencies_[index]) {
+    append_upload_dependency_wait(execution_info, phase_id, token);
   }
 }
 

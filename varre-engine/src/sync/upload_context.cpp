@@ -9,12 +9,12 @@
 #include <cstring>
 #include <limits>
 #include <ranges>
-#include <stdexcept>
 #include <utility>
 
 #include <fmt/format.h>
 
 #include "varre/engine/core/engine.hpp"
+#include "varre/engine/core/errors.hpp"
 
 namespace varre::engine {
 namespace detail {
@@ -60,7 +60,8 @@ std::uint32_t find_memory_type_index(const std::uint32_t memory_type_bits, const
       return index;
     }
   }
-  throw std::runtime_error(fmt::format("Unable to find memory type with required properties: {:#x}", static_cast<std::uint32_t>(required_properties)));
+  throw make_engine_error(EngineErrorCode::kMissingRequirement,
+                          fmt::format("Unable to find memory type with required properties: {:#x}", static_cast<std::uint32_t>(required_properties)));
 }
 
 /**
@@ -74,12 +75,46 @@ std::vector<vk::raii::CommandBuffer> allocate_one_time_command_buffer(const vk::
     vk::CommandBufferAllocateInfo{}.setCommandPool(*resource.command_pool).setLevel(vk::CommandBufferLevel::ePrimary).setCommandBufferCount(1U);
   return device.allocateCommandBuffers(allocate_info);
 }
+
+/**
+ * @brief Ensure semaphore wait stage mask is valid for submit2 semaphore waits.
+ * @param stage_mask Requested stage mask.
+ * @return Valid stage mask.
+ */
+[[nodiscard]] vk::PipelineStageFlags2 sanitize_wait_stage_mask(const vk::PipelineStageFlags2 stage_mask) {
+  if (stage_mask == vk::PipelineStageFlagBits2::eNone) {
+    return vk::PipelineStageFlagBits2::eAllCommands;
+  }
+  return stage_mask;
+}
 } // namespace detail
 
 UploadContext::UploadContext(const EngineContext *engine, const vk::raii::Device *device, const vk::raii::PhysicalDevice *physical_device,
-                             std::vector<QueueResources> &&queue_resources, const std::uint32_t submission_queue_family_index, const vk::Queue submission_queue)
+                             std::vector<QueueResources> &&queue_resources, const std::uint32_t submission_queue_family_index, const vk::Queue submission_queue,
+                             vk::raii::Semaphore &&timeline_semaphore)
     : engine_(engine), device_(device), physical_device_(physical_device), queue_resources_(std::move(queue_resources)),
-      submission_queue_family_index_(submission_queue_family_index), submission_queue_(submission_queue) {}
+      submission_queue_family_index_(submission_queue_family_index), submission_queue_(submission_queue), timeline_semaphore_(std::move(timeline_semaphore)) {}
+
+UploadContext::~UploadContext() {
+  if (device_ == nullptr || timeline_semaphore_ == nullptr || in_flight_uploads_.empty()) {
+    return;
+  }
+
+  const std::uint64_t wait_value = in_flight_uploads_.back().completion_value;
+  if (wait_value > 0U) {
+    try {
+      const vk::SemaphoreWaitInfo wait_info = vk::SemaphoreWaitInfo{}.setSemaphores(*timeline_semaphore_).setValues(wait_value);
+      static_cast<void>(device_->waitSemaphores(wait_info, std::numeric_limits<std::uint64_t>::max()));
+    } catch (...) {
+      try {
+        device_->waitIdle();
+      } catch (...) {
+      }
+    }
+  }
+
+  in_flight_uploads_.clear();
+}
 
 UploadContext UploadContext::create(const EngineContext &engine, const UploadContextCreateInfo &info) {
   const vk::raii::Device &device = engine.device();
@@ -102,8 +137,12 @@ UploadContext UploadContext::create(const EngineContext &engine, const UploadCon
     submission_queue = *topology.transfer_queue;
   }
 
+  const vk::SemaphoreTypeCreateInfo semaphore_type_info = vk::SemaphoreTypeCreateInfo{}.setSemaphoreType(vk::SemaphoreType::eTimeline).setInitialValue(0U);
+  const vk::SemaphoreCreateInfo semaphore_create_info = vk::SemaphoreCreateInfo{}.setPNext(&semaphore_type_info);
+  vk::raii::Semaphore timeline_semaphore(device, semaphore_create_info);
+
   return UploadContext{
-    &engine, &device, &engine.physical_device_raii(), std::move(queue_resources), submission_family_index, submission_queue,
+    &engine, &device, &engine.physical_device_raii(), std::move(queue_resources), submission_family_index, submission_queue, std::move(timeline_semaphore),
   };
 }
 
@@ -123,26 +162,35 @@ UploadContext::QueueResources *UploadContext::queue_resources_for_family(const s
   return &(*it);
 }
 
-void UploadContext::upload_buffer(const UploadBufferRequest &request) {
-  if (device_ == nullptr || physical_device_ == nullptr || engine_ == nullptr) {
-    throw std::runtime_error("UploadContext is not initialized.");
+UploadDependencyToken UploadContext::upload_buffer_async(const UploadBufferRequest &request) {
+  if (device_ == nullptr || physical_device_ == nullptr || engine_ == nullptr || timeline_semaphore_ == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "UploadContext is not initialized.");
   }
   if (request.destination_buffer == VK_NULL_HANDLE) {
-    throw std::runtime_error("UploadBufferRequest.destination_buffer must be valid.");
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "UploadBufferRequest.destination_buffer must be valid.");
   }
+
+  const vk::PipelineStageFlags2 wait_stage_mask = detail::sanitize_wait_stage_mask(request.destination_stage_mask);
   if (request.source_data.empty()) {
-    return;
+    return UploadDependencyToken{
+      .semaphore = *timeline_semaphore_,
+      .value = 0U,
+      .stage_mask = wait_stage_mask,
+    };
   }
+
+  collect_completed_uploads();
 
   const DeviceQueueTopology &topology = engine_->device_queue_topology();
   const std::uint32_t destination_family_index = request.destination_queue_family_index.value_or(topology.families.graphics);
   QueueResources *submission_resources = queue_resources_for_family(submission_queue_family_index_);
   QueueResources *destination_resources = queue_resources_for_family(destination_family_index);
   if (submission_resources == nullptr) {
-    throw std::runtime_error("Upload submission queue resources are unavailable.");
+    throw make_engine_error(EngineErrorCode::kInvalidState, "Upload submission queue resources are unavailable.");
   }
   if (destination_resources == nullptr) {
-    throw std::runtime_error(fmt::format("Destination queue family {} is not tracked by UploadContext.", destination_family_index));
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Destination queue family {} is not tracked by UploadContext.", destination_family_index));
   }
 
   const vk::DeviceSize upload_size = static_cast<vk::DeviceSize>(request.source_data.size_bytes());
@@ -190,7 +238,7 @@ void UploadContext::upload_buffer(const UploadBufferRequest &request) {
     const vk::BufferMemoryBarrier2 visibility_barrier = vk::BufferMemoryBarrier2{}
                                                           .setSrcStageMask(vk::PipelineStageFlagBits2::eCopy)
                                                           .setSrcAccessMask(vk::AccessFlagBits2::eTransferWrite)
-                                                          .setDstStageMask(request.destination_stage_mask)
+                                                          .setDstStageMask(wait_stage_mask)
                                                           .setDstAccessMask(request.destination_access_mask)
                                                           .setSrcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
                                                           .setDstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
@@ -200,27 +248,17 @@ void UploadContext::upload_buffer(const UploadBufferRequest &request) {
     const vk::DependencyInfo visibility_dependency = vk::DependencyInfo{}.setBufferMemoryBarriers(visibility_barrier);
     transfer_command_buffer.pipelineBarrier2(visibility_dependency);
   }
-
   transfer_command_buffer.end();
 
-  vk::raii::Fence transfer_fence(*device_, vk::FenceCreateInfo{});
-  const vk::SubmitInfo transfer_submit = vk::SubmitInfo{}.setCommandBuffers(*transfer_command_buffer);
-  submission_resources->queue.submit(transfer_submit, *transfer_fence);
-
-  const std::array transfer_fences{*transfer_fence};
-  const vk::Result transfer_wait = device_->waitForFences(transfer_fences, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
-  if (transfer_wait != vk::Result::eSuccess) {
-    throw std::runtime_error("Upload transfer submission did not complete successfully.");
-  }
-
+  std::vector<vk::raii::CommandBuffer> acquire_command_buffers;
   if (needs_queue_ownership_transfer) {
-    std::vector<vk::raii::CommandBuffer> acquire_command_buffers = detail::allocate_one_time_command_buffer(*device_, *destination_resources);
+    acquire_command_buffers = detail::allocate_one_time_command_buffer(*device_, *destination_resources);
     vk::raii::CommandBuffer &acquire_command_buffer = acquire_command_buffers.front();
     acquire_command_buffer.begin(begin_info);
     const vk::BufferMemoryBarrier2 acquire_barrier = vk::BufferMemoryBarrier2{}
                                                        .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
                                                        .setSrcAccessMask(vk::AccessFlagBits2::eNone)
-                                                       .setDstStageMask(request.destination_stage_mask)
+                                                       .setDstStageMask(wait_stage_mask)
                                                        .setDstAccessMask(request.destination_access_mask)
                                                        .setSrcQueueFamilyIndex(submission_queue_family_index_)
                                                        .setDstQueueFamilyIndex(destination_family_index)
@@ -230,17 +268,90 @@ void UploadContext::upload_buffer(const UploadBufferRequest &request) {
     const vk::DependencyInfo acquire_dependency = vk::DependencyInfo{}.setBufferMemoryBarriers(acquire_barrier);
     acquire_command_buffer.pipelineBarrier2(acquire_dependency);
     acquire_command_buffer.end();
-
-    vk::raii::Fence acquire_fence(*device_, vk::FenceCreateInfo{});
-    const vk::SubmitInfo acquire_submit = vk::SubmitInfo{}.setCommandBuffers(*acquire_command_buffer);
-    destination_resources->queue.submit(acquire_submit, *acquire_fence);
-
-    const std::array acquire_fences{*acquire_fence};
-    const vk::Result acquire_wait = device_->waitForFences(acquire_fences, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
-    if (acquire_wait != vk::Result::eSuccess) {
-      throw std::runtime_error("Upload ownership-acquire submission did not complete successfully.");
-    }
   }
+
+  const std::uint64_t transfer_complete_value = ++next_timeline_value_;
+  const std::uint64_t completion_value = needs_queue_ownership_transfer ? ++next_timeline_value_ : transfer_complete_value;
+
+  const vk::CommandBufferSubmitInfo transfer_command_buffer_submit_info = vk::CommandBufferSubmitInfo{}.setCommandBuffer(*transfer_command_buffer);
+  const vk::SemaphoreSubmitInfo transfer_signal_info =
+    vk::SemaphoreSubmitInfo{}.setSemaphore(*timeline_semaphore_).setValue(transfer_complete_value).setStageMask(vk::PipelineStageFlagBits2::eAllCommands);
+  const vk::SubmitInfo2 transfer_submit_info =
+    vk::SubmitInfo2{}.setCommandBufferInfos(transfer_command_buffer_submit_info).setSignalSemaphoreInfos(transfer_signal_info);
+
+  bool transfer_submitted = false;
+  try {
+    submission_resources->queue.submit2(transfer_submit_info, vk::Fence{});
+    transfer_submitted = true;
+
+    if (needs_queue_ownership_transfer) {
+      const vk::CommandBufferSubmitInfo acquire_command_buffer_submit_info = vk::CommandBufferSubmitInfo{}.setCommandBuffer(*acquire_command_buffers.front());
+      const vk::SemaphoreSubmitInfo acquire_wait_info =
+        vk::SemaphoreSubmitInfo{}.setSemaphore(*timeline_semaphore_).setValue(transfer_complete_value).setStageMask(wait_stage_mask);
+      const vk::SemaphoreSubmitInfo acquire_signal_info =
+        vk::SemaphoreSubmitInfo{}.setSemaphore(*timeline_semaphore_).setValue(completion_value).setStageMask(vk::PipelineStageFlagBits2::eAllCommands);
+      const vk::SubmitInfo2 acquire_submit_info = vk::SubmitInfo2{}
+                                                    .setWaitSemaphoreInfos(acquire_wait_info)
+                                                    .setCommandBufferInfos(acquire_command_buffer_submit_info)
+                                                    .setSignalSemaphoreInfos(acquire_signal_info);
+      destination_resources->queue.submit2(acquire_submit_info, vk::Fence{});
+    }
+  } catch (...) {
+    if (transfer_submitted) {
+      try {
+        submission_resources->queue.waitIdle();
+      } catch (...) {
+      }
+    }
+    throw;
+  }
+
+  InFlightUpload in_flight{};
+  in_flight.completion_value = completion_value;
+  in_flight.staging_buffer = std::move(staging_buffer);
+  in_flight.staging_memory = std::move(staging_memory);
+  in_flight.submission_command_buffers = std::move(transfer_command_buffers);
+  in_flight.destination_command_buffers = std::move(acquire_command_buffers);
+  in_flight_uploads_.push_back(std::move(in_flight));
+
+  return UploadDependencyToken{
+    .semaphore = *timeline_semaphore_,
+    .value = completion_value,
+    .stage_mask = wait_stage_mask,
+  };
+}
+
+void UploadContext::upload_buffer(const UploadBufferRequest &request) {
+  const UploadDependencyToken token = upload_buffer_async(request);
+  wait(token);
+}
+
+void UploadContext::wait(const UploadDependencyToken &token) {
+  if (device_ == nullptr || timeline_semaphore_ == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "UploadContext is not initialized.");
+  }
+  if (token.semaphore == VK_NULL_HANDLE) {
+    return;
+  }
+
+  const vk::SemaphoreWaitInfo wait_info = vk::SemaphoreWaitInfo{}.setSemaphores(token.semaphore).setValues(token.value);
+  const vk::Result wait_result = device_->waitSemaphores(wait_info, std::numeric_limits<std::uint64_t>::max());
+  if (wait_result != vk::Result::eSuccess) {
+    throw make_vulkan_result_error(wait_result, "UploadContext timeline wait failed");
+  }
+
+  if (token.semaphore == *timeline_semaphore_) {
+    collect_completed_uploads();
+  }
+}
+
+void UploadContext::collect_completed_uploads() {
+  if (device_ == nullptr || timeline_semaphore_ == nullptr || in_flight_uploads_.empty()) {
+    return;
+  }
+
+  const std::uint64_t completed_value = timeline_semaphore_.getCounterValue();
+  std::erase_if(in_flight_uploads_, [&](const InFlightUpload &in_flight) { return in_flight.completion_value <= completed_value; });
 }
 
 void UploadContext::wait_idle() const {
@@ -252,4 +363,28 @@ void UploadContext::wait_idle() const {
 std::uint32_t UploadContext::submission_queue_family_index() const noexcept { return submission_queue_family_index_; }
 
 vk::Queue UploadContext::submission_queue() const noexcept { return submission_queue_; }
+
+PassExternalWait make_upload_dependency_wait(const PassPhaseId phase_id, const UploadDependencyToken &token) {
+  if (token.semaphore == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "Upload dependency token semaphore must be valid.");
+  }
+
+  return PassExternalWait{
+    .phase_id = phase_id,
+    .semaphore = token.semaphore,
+    .value = token.value,
+    .stage_mask = detail::sanitize_wait_stage_mask(token.stage_mask),
+  };
+}
+
+void append_upload_dependency_wait(PassExecutionInfo *execution_info, const PassPhaseId phase_id, const UploadDependencyToken &token) {
+  if (execution_info == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "append_upload_dependency_wait requires a non-null execution_info.");
+  }
+  if (token.semaphore == VK_NULL_HANDLE) {
+    return;
+  }
+
+  execution_info->waits.push_back(make_upload_dependency_wait(phase_id, token));
+}
 } // namespace varre::engine

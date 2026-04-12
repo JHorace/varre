@@ -730,7 +730,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                              .setStageMask(detail::submit_stage_mask(phase.phase->description.kind)));
     }
     for (const PassExternalWait &wait : waits_by_phase[phase_index]) {
-      wait_infos.push_back(vk::SemaphoreSubmitInfo{}.setSemaphore(wait.semaphore).setValue(0U).setStageMask(wait.stage_mask));
+      wait_infos.push_back(vk::SemaphoreSubmitInfo{}.setSemaphore(wait.semaphore).setValue(wait.value).setStageMask(wait.stage_mask));
     }
 
     std::vector<vk::SemaphoreSubmitInfo> signal_infos;
@@ -741,7 +741,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                              .setValue(phase_timeline_values[phase_index])
                              .setStageMask(detail::submit_stage_mask(phase.phase->description.kind)));
     for (const PassExternalSignal &signal : signals_by_phase[phase_index]) {
-      signal_infos.push_back(vk::SemaphoreSubmitInfo{}.setSemaphore(signal.semaphore).setValue(0U).setStageMask(signal.stage_mask));
+      signal_infos.push_back(vk::SemaphoreSubmitInfo{}.setSemaphore(signal.semaphore).setValue(signal.value).setStageMask(signal.stage_mask));
     }
 
     const vk::CommandBufferSubmitInfo command_buffer_submit_info = vk::CommandBufferSubmitInfo{}.setCommandBuffer(command_buffer_handles[phase_index]);

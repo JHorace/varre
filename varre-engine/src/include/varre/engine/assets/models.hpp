@@ -110,6 +110,16 @@ struct GpuMesh {
 };
 
 /**
+ * @brief Result of one asynchronous mesh upload.
+ */
+struct GpuMeshUploadResult {
+  /** @brief Uploaded GPU mesh buffers. */
+  GpuMesh mesh{};
+  /** @brief Upload dependency tokens required before first GPU usage. */
+  std::vector<UploadDependencyToken> upload_dependencies;
+};
+
+/**
  * @brief Model-upload service creation options.
  */
 struct ModelUploadCreateInfo {
@@ -159,6 +169,14 @@ public:
   [[nodiscard]] const GpuMesh &get_or_upload(varre::assets::ModelId model_id);
 
   /**
+   * @brief Resolve one model asset and return upload dependencies for pass execution.
+   * @param model_id Model asset identifier.
+   * @param out_dependencies Optional destination for dependency tokens.
+   * @return Immutable uploaded mesh reference.
+   */
+  [[nodiscard]] const GpuMesh &get_or_upload_with_dependencies(varre::assets::ModelId model_id, std::vector<UploadDependencyToken> *out_dependencies);
+
+  /**
    * @brief Upload one already decoded model asset into GPU buffers.
    * @param model Decoded model asset.
    * @return Newly uploaded GPU mesh.
@@ -166,11 +184,34 @@ public:
   [[nodiscard]] GpuMesh upload(const varre::assets::ModelAsset &model);
 
   /**
+   * @brief Upload one model asset and return dependency tokens for pass execution.
+   * @param model Decoded model asset.
+   * @return Uploaded mesh + dependency tokens.
+   */
+  [[nodiscard]] GpuMeshUploadResult upload_with_dependencies(const varre::assets::ModelAsset &model);
+
+  /**
    * @brief Upload one already decoded model asset and cache the result by model ID.
    * @param model Decoded model asset.
    * @return Immutable uploaded mesh reference.
    */
   [[nodiscard]] const GpuMesh &upload_and_cache(const varre::assets::ModelAsset &model);
+
+  /**
+   * @brief Upload/cache one model asset and return dependency tokens for pass execution.
+   * @param model Decoded model asset.
+   * @param out_dependencies Optional destination for dependency tokens.
+   * @return Immutable uploaded mesh reference.
+   */
+  [[nodiscard]] const GpuMesh &upload_and_cache_with_dependencies(const varre::assets::ModelAsset &model, std::vector<UploadDependencyToken> *out_dependencies);
+
+  /**
+   * @brief Append cached upload dependency waits for one model onto a pass execution.
+   * @param execution_info Destination pass execution info.
+   * @param phase_id Target phase id that will consume this model.
+   * @param model_id Model identifier previously uploaded through this service.
+   */
+  void append_upload_dependency_waits(PassExecutionInfo *execution_info, PassPhaseId phase_id, varre::assets::ModelId model_id) const;
 
   /**
    * @brief Destroy all cached GPU meshes after waiting for upload queues to go idle.
@@ -212,8 +253,10 @@ private:
    * @param destination Destination GPU buffer.
    * @param data Byte range to upload.
    * @param destination_access_mask Destination access mask.
+   * @return Upload dependency token for pass-mode waits.
    */
-  void upload_bytes_to_buffer(const GpuBuffer &destination, std::span<const std::byte> data, vk::AccessFlags2 destination_access_mask);
+  [[nodiscard]] UploadDependencyToken upload_bytes_to_buffer(const GpuBuffer &destination, std::span<const std::byte> data,
+                                                             vk::AccessFlags2 destination_access_mask);
 
   /**
    * @brief Find the cached model index for one model identifier.
@@ -227,6 +270,7 @@ private:
   VmaAllocator allocator_ = nullptr;
   std::vector<varre::assets::ModelId> cached_ids_;
   std::vector<GpuMesh> cached_meshes_;
+  std::vector<std::vector<UploadDependencyToken>> cached_upload_dependencies_;
 };
 
 } // namespace varre::engine
@@ -234,6 +278,7 @@ private:
 namespace varre::engine::asset {
 using ::varre::engine::GpuBuffer;
 using ::varre::engine::GpuMesh;
+using ::varre::engine::GpuMeshUploadResult;
 using ::varre::engine::ModelUploadCreateInfo;
 using ::varre::engine::ModelUploadService;
 } // namespace varre::engine::asset
