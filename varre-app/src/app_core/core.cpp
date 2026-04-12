@@ -181,9 +181,6 @@ AppCore AppCore::create(const AppCoreCreateInfo &create_info) {
 
   engine::SwapchainCreateInfo swapchain_create_info = create_info.swapchain;
   update_swapchain_extent_from_window(window.get(), create_info.sync_swapchain_extent_with_window, &swapchain_create_info);
-  engine::SwapchainContext swapchain = engine::SwapchainContext::create(engine, surface, swapchain_create_info);
-
-  engine::PassFrameLoop pass_frame_loop = engine::PassFrameLoop::create(engine, swapchain, create_info.frame_loop, create_info.pass_executor);
 
   const SDL_WindowID window_id = SDL_GetWindowID(window.get());
   if (window_id == 0U) {
@@ -197,18 +194,20 @@ AppCore AppCore::create(const AppCoreCreateInfo &create_info) {
     create_info.sync_swapchain_extent_with_window,
     std::move(engine),
     std::move(surface),
-    std::move(swapchain),
-    std::move(pass_frame_loop),
     swapchain_create_info,
+    create_info.frame_loop,
+    create_info.pass_executor,
   };
 }
 
 AppCore::AppCore(SdlVideoSubsystemGuard &&sdl_video, WindowPtr &&window, const SDL_WindowID window_id, const bool sync_swapchain_extent_with_window,
-                 engine::EngineContext &&engine, engine::SurfaceContext &&surface, engine::SwapchainContext &&swapchain,
-                 engine::PassFrameLoop &&pass_frame_loop, engine::SwapchainCreateInfo swapchain_create_info)
+                 engine::EngineContext &&engine, engine::SurfaceContext &&surface, engine::SwapchainCreateInfo swapchain_create_info,
+                 const engine::FrameLoopCreateInfo &frame_loop_create_info, const engine::PassExecutorCreateInfo &pass_executor_create_info)
     : sdl_video_(std::move(sdl_video)), window_(std::move(window)), window_id_(window_id),
       sync_swapchain_extent_with_window_(sync_swapchain_extent_with_window), engine_(std::move(engine)), surface_(std::move(surface)),
-      swapchain_(std::move(swapchain)), pass_frame_loop_(std::move(pass_frame_loop)), swapchain_create_info_(swapchain_create_info) {}
+      swapchain_(engine::SwapchainContext::create(engine_, surface_, swapchain_create_info)),
+      pass_frame_loop_(engine::PassFrameLoop::create(engine_, swapchain_, frame_loop_create_info, pass_executor_create_info)),
+      swapchain_create_info_(swapchain_create_info) {}
 
 SDL_Window *AppCore::window() const noexcept { return window_.get(); }
 

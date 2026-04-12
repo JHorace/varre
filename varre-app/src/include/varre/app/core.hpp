@@ -100,9 +100,8 @@ public:
    */
   [[nodiscard]] static engine::SurfaceContext create_surface_for_window(const engine::EngineContext &engine, SDL_Window *window);
 
-  AppCore(AppCore &&other) noexcept = default;
-  AppCore &operator=(AppCore &&other) noexcept = default;
-
+  AppCore(AppCore &&other) noexcept = delete;
+  AppCore &operator=(AppCore &&other) noexcept = delete;
   AppCore(const AppCore &) = delete;
   AppCore &operator=(const AppCore &) = delete;
 
@@ -238,8 +237,8 @@ private:
    * @brief Internal constructor from initialized resources.
    */
   AppCore(SdlVideoSubsystemGuard &&sdl_video, WindowPtr &&window, SDL_WindowID window_id, bool sync_swapchain_extent_with_window,
-          engine::EngineContext &&engine, engine::SurfaceContext &&surface, engine::SwapchainContext &&swapchain, engine::PassFrameLoop &&pass_frame_loop,
-          engine::SwapchainCreateInfo swapchain_create_info);
+          engine::EngineContext &&engine, engine::SurfaceContext &&surface, engine::SwapchainCreateInfo swapchain_create_info,
+          const engine::FrameLoopCreateInfo &frame_loop_create_info, const engine::PassExecutorCreateInfo &pass_executor_create_info);
 
   SdlVideoSubsystemGuard sdl_video_;
   WindowPtr window_{nullptr, WindowDeleter{}};
