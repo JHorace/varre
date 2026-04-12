@@ -135,13 +135,18 @@ std::uint32_t select_image_count(const vk::SurfaceCapabilitiesKHR &capabilities)
  */
 vk::Extent2D select_extent(const vk::SurfaceCapabilitiesKHR &capabilities, const vk::Extent2D preferred) {
   if (capabilities.currentExtent.width != std::numeric_limits<std::uint32_t>::max()) {
+    if (capabilities.currentExtent.width == 0U || capabilities.currentExtent.height == 0U) {
+      throw make_engine_error(EngineErrorCode::kSwapchainOutOfDate,
+                              "Swapchain extent is 0x0 for the current surface size (window may be minimized).");
+    }
     return capabilities.currentExtent;
   }
 
   const std::uint32_t width = std::clamp(preferred.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
   const std::uint32_t height = std::clamp(preferred.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
   if (width == 0U || height == 0U) {
-    throw make_engine_error(EngineErrorCode::kSurfaceUnsupported, "Swapchain extent resolved to zero; surface is likely minimized.");
+    throw make_engine_error(EngineErrorCode::kSwapchainOutOfDate,
+                            "Swapchain extent resolved to 0x0 from preferred extent (window may be minimized).");
   }
   return vk::Extent2D{width, height};
 }
@@ -282,7 +287,12 @@ SwapchainContext SwapchainContext::create_internal(const EngineContext &engine, 
     create_info = create_info.setImageSharingMode(vk::SharingMode::eExclusive);
   }
 
-  vk::raii::SwapchainKHR swapchain(engine.device(), create_info);
+  vk::raii::SwapchainKHR swapchain{nullptr};
+  try {
+    swapchain = vk::raii::SwapchainKHR(engine.device(), create_info);
+  } catch (const vk::OutOfDateKHRError &) {
+    throw make_engine_error(EngineErrorCode::kSwapchainOutOfDate, "Swapchain creation reported out-of-date surface state.");
+  }
   std::vector<vk::Image> images = swapchain.getImages();
   if (images.empty()) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "Vulkan created a swapchain with zero images.");

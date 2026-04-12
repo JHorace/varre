@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <ranges>
 
 #include "varre/engine/core/engine.hpp"
@@ -27,6 +28,53 @@ void append_unique_semaphore(std::vector<vk::Semaphore> *semaphores, const vk::S
     semaphores->push_back(semaphore);
   }
 }
+
+/**
+ * @brief Build frame synchronization primitives for one frame-slot count.
+ * @param device Logical device.
+ * @param frame_count Frame-slot count.
+ * @return Frame synchronization resources.
+ */
+[[nodiscard]] std::vector<FrameSyncPrimitives> create_frame_sync_primitives(const vk::raii::Device &device, const std::uint32_t frame_count) {
+  const vk::SemaphoreCreateInfo semaphore_create_info{};
+  const vk::FenceCreateInfo fence_create_info = vk::FenceCreateInfo{}.setFlags(vk::FenceCreateFlagBits::eSignaled);
+
+  std::vector<FrameSyncPrimitives> frames;
+  frames.reserve(frame_count);
+  for (std::uint32_t index = 0; index < frame_count; ++index) {
+    static_cast<void>(index);
+    FrameSyncPrimitives frame{};
+    frame.image_available = vk::raii::Semaphore(device, semaphore_create_info);
+    frame.render_finished = vk::raii::Semaphore(device, semaphore_create_info);
+    frame.in_flight = vk::raii::Fence(device, fence_create_info);
+    frames.push_back(std::move(frame));
+  }
+  return frames;
+}
+
+/**
+ * @brief Resolve a valid frame-slot count from a swapchain and requested count.
+ * @param swapchain Active swapchain context.
+ * @param requested_frame_count Requested frame-slot count (`0` uses swapchain default).
+ * @return Clamped frame-slot count.
+ */
+[[nodiscard]] std::uint32_t resolve_frame_count(const SwapchainContext &swapchain, const std::uint32_t requested_frame_count) {
+  if (swapchain.image_count() == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "Swapchain has no images.");
+  }
+  const std::uint32_t frame_count = requested_frame_count == 0U ? swapchain.max_frames_in_flight() : requested_frame_count;
+  return std::clamp(frame_count, 1U, swapchain.image_count());
+}
+
+/**
+ * @brief Whether an engine error during recreate is recoverable for normal resize flow.
+ * @param error Engine error instance.
+ * @return `true` when caller can retry recreate later.
+ */
+[[nodiscard]] bool is_recoverable_recreate_error(const EngineError &error) noexcept {
+  return error.code() == EngineErrorCode::kSwapchainOutOfDate || error.code() == EngineErrorCode::kSwapchainSuboptimal ||
+         error.code() == EngineErrorCode::kSurfaceUnsupported;
+}
 } // namespace detail
 
 FrameLoop::FrameLoop(const vk::raii::Device *device, const vk::Queue graphics_queue, const vk::Queue present_queue, std::vector<FrameSyncPrimitives> &&frames,
@@ -39,21 +87,9 @@ FrameLoop::FrameLoop(const vk::raii::Device *device, const vk::Queue graphics_qu
 FrameLoop FrameLoop::create(const EngineContext &engine, const SwapchainContext &swapchain, const FrameLoopCreateInfo &info) {
   const vk::raii::Device &device = engine.device();
   const SwapchainQueueTopology &queue_topology = swapchain.swapchain_queue_topology();
-  std::uint32_t frame_count = info.frame_count == 0U ? swapchain.max_frames_in_flight() : info.frame_count;
-  frame_count = std::clamp(frame_count, 1U, swapchain.image_count());
+  const std::uint32_t frame_count = detail::resolve_frame_count(swapchain, info.frame_count);
 
-  const vk::SemaphoreCreateInfo semaphore_create_info{};
-  const vk::FenceCreateInfo fence_create_info = vk::FenceCreateInfo{}.setFlags(vk::FenceCreateFlagBits::eSignaled);
-
-  std::vector<FrameSyncPrimitives> frames;
-  frames.reserve(frame_count);
-  for (std::uint32_t index = 0; index < frame_count; ++index) {
-    FrameSyncPrimitives frame{};
-    frame.image_available = vk::raii::Semaphore(device, semaphore_create_info);
-    frame.render_finished = vk::raii::Semaphore(device, semaphore_create_info);
-    frame.in_flight = vk::raii::Fence(device, fence_create_info);
-    frames.push_back(std::move(frame));
-  }
+  std::vector<FrameSyncPrimitives> frames = detail::create_frame_sync_primitives(device, frame_count);
 
   std::vector<vk::Fence> image_in_flight_fences(swapchain.image_count(), VK_NULL_HANDLE);
   return FrameLoop{
@@ -69,7 +105,11 @@ AcquiredFrame FrameLoop::acquire_next_image(const SwapchainContext &swapchain, c
     throw make_engine_error(EngineErrorCode::kInvalidState, "Swapchain has no images.");
   }
   if (image_in_flight_fences_.size() != swapchain.image_count()) {
-    throw make_engine_error(EngineErrorCode::kInvalidState, "Swapchain image count changed; call FrameLoop::reset_for_swapchain before acquiring.");
+    wait_idle();
+    reset_for_swapchain(swapchain);
+  }
+  if (frames_.empty()) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "FrameLoop has no frame synchronization primitives.");
   }
 
   AcquiredFrame result{
@@ -95,6 +135,10 @@ AcquiredFrame FrameLoop::acquire_next_image(const SwapchainContext &swapchain, c
   try {
     const vk::ResultValue<std::uint32_t> acquire_result = swapchain.swapchain().acquireNextImage(timeout_ns, *frame.image_available, vk::Fence{});
     result.image_index = acquire_result.value;
+    if (result.image_index >= image_in_flight_fences_.size()) {
+      throw make_engine_error(EngineErrorCode::kInvalidState,
+                              "Swapchain acquire returned an out-of-range image index after resize/recreate.");
+    }
     if (acquire_result.result == vk::Result::eSuboptimalKHR) {
       result.status = FrameAcquireStatus::kSuboptimal;
       result.error_code = EngineErrorCode::kSwapchainSuboptimal;
@@ -255,35 +299,90 @@ void FrameLoop::flush_deferred_releases() {
 }
 
 void FrameLoop::recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info) {
-  if (swapchain == nullptr) {
-    throw make_engine_error(EngineErrorCode::kInvalidArgument, "FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
-  }
-  wait_idle();
-  flush_deferred_releases();
-  *swapchain = swapchain->recreate(recreate_info);
-  notify_swapchain_recreated(*swapchain);
+  static_cast<void>(try_recreate_swapchain(swapchain, recreate_info));
 }
 
 void FrameLoop::recreate_swapchain(SwapchainContext *swapchain) {
+  static_cast<void>(try_recreate_swapchain(swapchain));
+}
+
+bool FrameLoop::try_recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info) {
   if (swapchain == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidArgument, "FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
   }
   wait_idle();
   flush_deferred_releases();
-  *swapchain = swapchain->recreate();
-  notify_swapchain_recreated(*swapchain);
+  try {
+    *swapchain = swapchain->recreate(recreate_info);
+    notify_swapchain_recreated(*swapchain);
+    return true;
+  } catch (const EngineError &error) {
+    frame_acquired_ = false;
+    frame_submitted_ = false;
+    render_finished_signaled_ = false;
+    if (detail::is_recoverable_recreate_error(error)) {
+      swapchain_recreation_required_ = true;
+      return false;
+    }
+    throw;
+  }
+}
+
+bool FrameLoop::try_recreate_swapchain(SwapchainContext *swapchain) {
+  if (swapchain == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
+  }
+  wait_idle();
+  flush_deferred_releases();
+  try {
+    *swapchain = swapchain->recreate();
+    notify_swapchain_recreated(*swapchain);
+    return true;
+  } catch (const EngineError &error) {
+    frame_acquired_ = false;
+    frame_submitted_ = false;
+    render_finished_signaled_ = false;
+    if (detail::is_recoverable_recreate_error(error)) {
+      swapchain_recreation_required_ = true;
+      return false;
+    }
+    throw;
+  }
 }
 
 void FrameLoop::notify_swapchain_recreated(const SwapchainContext &swapchain) {
+  if (device_ == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "FrameLoop is not initialized.");
+  }
+  const std::uint32_t target_frame_count = detail::resolve_frame_count(swapchain, swapchain.max_frames_in_flight());
+
+  if (frames_.size() != target_frame_count) {
+    std::vector<std::function<void()>> pending_callbacks;
+    for (std::vector<std::function<void()>> &callbacks : deferred_releases_) {
+      for (std::function<void()> &callback : callbacks) {
+        if (callback) {
+          pending_callbacks.push_back(std::move(callback));
+        }
+      }
+    }
+    frames_ = detail::create_frame_sync_primitives(*device_, target_frame_count);
+    deferred_releases_.assign(frames_.size(), {});
+    if (!pending_callbacks.empty()) {
+      deferred_releases_[0].insert(deferred_releases_[0].end(), std::make_move_iterator(pending_callbacks.begin()),
+                                   std::make_move_iterator(pending_callbacks.end()));
+    }
+  } else if (deferred_releases_.size() != frames_.size()) {
+    deferred_releases_.resize(frames_.size());
+  }
+
+  graphics_queue_ = swapchain.swapchain_queue_topology().graphics_queue;
   present_queue_ = swapchain.swapchain_queue_topology().present_queue;
   image_in_flight_fences_.assign(swapchain.image_count(), VK_NULL_HANDLE);
   frame_acquired_ = false;
   frame_submitted_ = false;
   render_finished_signaled_ = false;
   swapchain_recreation_required_ = false;
-  if (current_frame_index_ >= frames_.size()) {
-    current_frame_index_ = 0U;
-  }
+  current_frame_index_ = frames_.empty() ? 0U : current_frame_index_ % static_cast<std::uint32_t>(frames_.size());
 }
 
 void FrameLoop::reset_for_swapchain(const SwapchainContext &swapchain) { notify_swapchain_recreated(swapchain); }

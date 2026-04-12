@@ -225,16 +225,49 @@ public:
    * @brief Recreate and rebind the swapchain in one step.
    * @param swapchain Swapchain instance to recreate in place.
    * @param recreate_info Creation preferences for the new swapchain.
-   * @throws EngineError when @p swapchain is null.
+   *
+   * Recoverable recreate failures (for example minimized window extent) keep
+   * `swapchain_recreation_required()` set to `true` and return without throwing.
+   *
+   * @throws EngineError when @p swapchain is null or on unrecoverable recreate failure.
    */
   void recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info);
 
   /**
    * @brief Recreate and rebind the swapchain using prior creation preferences.
    * @param swapchain Swapchain instance to recreate in place.
-   * @throws EngineError when @p swapchain is null.
+   *
+   * Recoverable recreate failures (for example minimized window extent) keep
+   * `swapchain_recreation_required()` set to `true` and return without throwing.
+   *
+   * @throws EngineError when @p swapchain is null or on unrecoverable recreate failure.
    */
   void recreate_swapchain(SwapchainContext *swapchain);
+
+  /**
+   * @brief Attempt to recreate and rebind the swapchain in one step.
+   * @param swapchain Swapchain instance to recreate in place.
+   * @param recreate_info Creation preferences for the new swapchain.
+   * @return `true` when recreation succeeded and frame-loop state was rebound.
+   *
+   * Returns `false` for recoverable recreate failures (for example minimized
+   * window extent), while leaving `swapchain_recreation_required()` set.
+   *
+   * @throws EngineError when @p swapchain is null or on unrecoverable recreate failure.
+   */
+  [[nodiscard]] bool try_recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info);
+
+  /**
+   * @brief Attempt to recreate and rebind the swapchain using prior preferences.
+   * @param swapchain Swapchain instance to recreate in place.
+   * @return `true` when recreation succeeded and frame-loop state was rebound.
+   *
+   * Returns `false` for recoverable recreate failures (for example minimized
+   * window extent), while leaving `swapchain_recreation_required()` set.
+   *
+   * @throws EngineError when @p swapchain is null or on unrecoverable recreate failure.
+   */
+  [[nodiscard]] bool try_recreate_swapchain(SwapchainContext *swapchain);
 
   /**
    * @brief Notify frame loop that a new swapchain instance is active.
