@@ -85,11 +85,13 @@ EngineContext EngineContext::create(const EngineInitInfo &info) {
                                               .setPpEnabledExtensionNames(enabled_device_extension_ptrs.data());
 
   std::optional<vk::PhysicalDeviceFeatures2> device_features2;
+  std::optional<vk::PhysicalDeviceVulkan12Features> vulkan_12_features;
   std::optional<vk::PhysicalDeviceVulkan13Features> vulkan_13_features;
   std::optional<vk::PhysicalDeviceShaderObjectFeaturesEXT> shader_object_features;
   shader_object_features = vk::PhysicalDeviceShaderObjectFeaturesEXT{}.setShaderObject(VK_TRUE);
   vulkan_13_features = vk::PhysicalDeviceVulkan13Features{}.setPNext(&(*shader_object_features)).setDynamicRendering(VK_TRUE).setSynchronization2(VK_TRUE);
-  device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_13_features));
+  vulkan_12_features = vk::PhysicalDeviceVulkan12Features{}.setPNext(&(*vulkan_13_features)).setTimelineSemaphore(VK_TRUE);
+  device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_12_features));
   device_create_info = device_create_info.setPNext(&(*device_features2));
 
   vk::raii::Device device(physical_device, device_create_info);

@@ -27,10 +27,15 @@ namespace {
   missing_features->clear();
 
   const auto feature_chain =
-    physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceShaderObjectFeaturesEXT>();
+    physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
+                                 vk::PhysicalDeviceShaderObjectFeaturesEXT>();
+  const vk::PhysicalDeviceVulkan12Features &vulkan_12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
   const vk::PhysicalDeviceVulkan13Features &vulkan_13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
   const vk::PhysicalDeviceShaderObjectFeaturesEXT &shader_object_features = feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
 
+  if (!vulkan_12_features.timelineSemaphore) {
+    missing_features->push_back("timelineSemaphore");
+  }
   if (!vulkan_13_features.dynamicRendering) {
     missing_features->push_back("dynamicRendering");
   }
