@@ -1,6 +1,8 @@
 add_library(
   varre_engine STATIC
   engine.cpp
+  swapchain.cpp
+  frame_loop.cpp
 )
 add_library(varre::engine ALIAS varre_engine)
 
@@ -15,4 +17,3 @@ target_include_directories(
 # Engine source layout mirrors the Rust module structure.
 add_subdirectory(geometry)
 add_subdirectory(render_context)
-

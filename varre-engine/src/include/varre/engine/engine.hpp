@@ -101,6 +101,12 @@ public:
   [[nodiscard]] vk::PhysicalDevice physical_device() const noexcept;
 
   /**
+   * @brief Access the selected physical-device RAII wrapper.
+   * @return Immutable Vulkan RAII physical device.
+   */
+  [[nodiscard]] const vk::raii::PhysicalDevice &physical_device_raii() const noexcept;
+
+  /**
    * @brief Access the logical device.
    * @return Immutable Vulkan RAII device.
    */
