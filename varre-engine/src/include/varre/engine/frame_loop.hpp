@@ -14,6 +14,7 @@ namespace varre::engine {
 
 class EngineContext;
 class SwapchainContext;
+struct SwapchainCreateInfo;
 
 /**
  * @brief Synchronization objects used by one frame slot.
@@ -133,6 +134,31 @@ public:
   [[nodiscard]] FramePresentStatus present(const SwapchainContext &swapchain, std::uint32_t image_index);
 
   /**
+   * @brief Whether swapchain recreation is currently required.
+   * @return `true` when acquire/present reported out-of-date or suboptimal state.
+   */
+  [[nodiscard]] bool swapchain_recreation_required() const noexcept;
+
+  /**
+   * @brief Recreate and rebind the swapchain in one step.
+   * @param swapchain Swapchain instance to recreate in place.
+   * @param recreate_info Creation preferences for the new swapchain.
+   */
+  void recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info);
+
+  /**
+   * @brief Recreate and rebind the swapchain using prior creation preferences.
+   * @param swapchain Swapchain instance to recreate in place.
+   */
+  void recreate_swapchain(SwapchainContext *swapchain);
+
+  /**
+   * @brief Notify frame loop that a new swapchain instance is active.
+   * @param swapchain New swapchain context.
+   */
+  void notify_swapchain_recreated(const SwapchainContext &swapchain);
+
+  /**
    * @brief Reset image-tracking state after swapchain recreation.
    * @param swapchain New swapchain context.
    */
@@ -180,6 +206,7 @@ private:
   std::vector<vk::Fence> image_in_flight_fences_;
   std::uint32_t current_frame_index_ = 0U;
   bool frame_acquired_ = false;
+  bool swapchain_recreation_required_ = false;
 };
 
 } // namespace varre::engine

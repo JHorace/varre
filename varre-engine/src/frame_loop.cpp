@@ -28,6 +28,7 @@ namespace varre::engine {
 
   FrameLoop FrameLoop::create(const EngineContext &engine, const SwapchainContext &swapchain, const FrameLoopCreateInfo &info) {
     const vk::raii::Device &device = engine.device();
+    const SurfaceQueueTopology &queue_topology = swapchain.queue_topology();
     std::uint32_t frame_count = info.frame_count == 0U ? swapchain.max_frames_in_flight() : info.frame_count;
     frame_count = std::clamp(frame_count, 1U, swapchain.image_count());
 
@@ -45,7 +46,13 @@ namespace varre::engine {
     }
 
     std::vector<vk::Fence> image_in_flight_fences(swapchain.image_count(), VK_NULL_HANDLE);
-    return FrameLoop{&device, engine.graphics_queue(), swapchain.present_queue(), std::move(frames), std::move(image_in_flight_fences)};
+    return FrameLoop{
+        &device,
+        queue_topology.graphics_queue,
+        queue_topology.present_queue,
+        std::move(frames),
+        std::move(image_in_flight_fences),
+    };
   }
 
   AcquiredFrame FrameLoop::acquire_next_image(const SwapchainContext &swapchain, const std::uint64_t timeout_ns) {
@@ -75,9 +82,15 @@ namespace varre::engine {
     try {
       const vk::ResultValue<std::uint32_t> acquire_result = swapchain.swapchain().acquireNextImage(timeout_ns, *frame.image_available, vk::Fence{});
       result.image_index = acquire_result.value;
-      result.status = acquire_result.result == vk::Result::eSuboptimalKHR ? FrameAcquireStatus::kSuboptimal : FrameAcquireStatus::kSuccess;
+      if (acquire_result.result == vk::Result::eSuboptimalKHR) {
+        result.status = FrameAcquireStatus::kSuboptimal;
+        swapchain_recreation_required_ = true;
+      } else {
+        result.status = FrameAcquireStatus::kSuccess;
+      }
     } catch (const vk::OutOfDateKHRError &) {
       frame_acquired_ = false;
+      swapchain_recreation_required_ = true;
       result.status = FrameAcquireStatus::kOutOfDate;
       return result;
     }
@@ -130,10 +143,12 @@ namespace varre::engine {
       const vk::Result result = present_queue_.presentKHR(present_info);
       if (result == vk::Result::eSuboptimalKHR) {
         status = FramePresentStatus::kSuboptimal;
+        swapchain_recreation_required_ = true;
       } else if (result != vk::Result::eSuccess) {
         throw std::runtime_error("Queue present failed with unexpected Vulkan result.");
       }
     } catch (const vk::OutOfDateKHRError &) {
+      swapchain_recreation_required_ = true;
       status = FramePresentStatus::kOutOfDate;
     }
 
@@ -142,12 +157,38 @@ namespace varre::engine {
     return status;
   }
 
-  void FrameLoop::reset_for_swapchain(const SwapchainContext &swapchain) {
+  bool FrameLoop::swapchain_recreation_required() const noexcept { return swapchain_recreation_required_; }
+
+  void FrameLoop::recreate_swapchain(SwapchainContext *swapchain, const SwapchainCreateInfo &recreate_info) {
+    if (swapchain == nullptr) {
+      throw std::runtime_error("FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
+    }
+    wait_idle();
+    *swapchain = swapchain->recreate(recreate_info);
+    notify_swapchain_recreated(*swapchain);
+  }
+
+  void FrameLoop::recreate_swapchain(SwapchainContext *swapchain) {
+    if (swapchain == nullptr) {
+      throw std::runtime_error("FrameLoop::recreate_swapchain requires a valid SwapchainContext pointer.");
+    }
+    wait_idle();
+    *swapchain = swapchain->recreate();
+    notify_swapchain_recreated(*swapchain);
+  }
+
+  void FrameLoop::notify_swapchain_recreated(const SwapchainContext &swapchain) {
+    present_queue_ = swapchain.queue_topology().present_queue;
     image_in_flight_fences_.assign(swapchain.image_count(), VK_NULL_HANDLE);
     frame_acquired_ = false;
+    swapchain_recreation_required_ = false;
     if (current_frame_index_ >= frames_.size()) {
       current_frame_index_ = 0U;
     }
+  }
+
+  void FrameLoop::reset_for_swapchain(const SwapchainContext &swapchain) {
+    notify_swapchain_recreated(swapchain);
   }
 
   void FrameLoop::wait_idle() const {

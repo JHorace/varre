@@ -409,10 +409,11 @@ namespace varre::engine {
   EngineContext::EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
                                vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices,
                                const vk::Queue graphics_queue, std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue,
-                               const bool validation_enabled, DeviceProfile device_profile)
+                               const bool validation_enabled, QueueTopology queue_topology, DeviceProfile device_profile)
     : context_(std::move(context)), instance_(std::move(instance)), debug_messenger_(std::move(debug_messenger)), physical_device_(std::move(physical_device)),
       device_(std::move(device)), queue_family_indices_(queue_family_indices), graphics_queue_(graphics_queue), async_compute_queue_(async_compute_queue),
-      transfer_queue_(transfer_queue), validation_enabled_(validation_enabled), device_profile_(std::move(device_profile)) {
+      transfer_queue_(transfer_queue), validation_enabled_(validation_enabled), queue_topology_(std::move(queue_topology)),
+      device_profile_(std::move(device_profile)) {
   }
 
   EngineContext EngineContext::create(const EngineInitInfo &info) {
@@ -488,6 +489,15 @@ namespace varre::engine {
       transfer_queue = device.getQueue(*selected_device.queues.indices.transfer, 0);
     }
 
+    QueueTopology queue_topology{
+      .families = selected_device.queues.indices,
+      .graphics_queue = graphics_queue,
+      .async_compute_queue = async_compute_queue,
+      .transfer_queue = transfer_queue,
+      .has_dedicated_async_compute = selected_device.queues.has_dedicated_async_compute,
+      .has_dedicated_transfer = selected_device.queues.has_dedicated_transfer,
+    };
+
     const vk::PhysicalDeviceProperties selected_properties = physical_device.getProperties();
     DeviceProfile resolved_device_profile{
       .device_name = selected_properties.deviceName,
@@ -510,6 +520,7 @@ namespace varre::engine {
       async_compute_queue,
       transfer_queue,
       info.enable_validation,
+      std::move(queue_topology),
       std::move(resolved_device_profile),
     };
   }
@@ -525,6 +536,8 @@ namespace varre::engine {
   const vk::raii::Device &EngineContext::device() const noexcept { return device_; }
 
   const QueueFamilyIndices &EngineContext::queue_family_indices() const noexcept { return queue_family_indices_; }
+
+  const QueueTopology &EngineContext::queue_topology() const noexcept { return queue_topology_; }
 
   vk::Queue EngineContext::graphics_queue() const noexcept { return graphics_queue_; }
 

@@ -26,6 +26,24 @@ struct QueueFamilyIndices {
 };
 
 /**
+ * @brief Resolved queue topology for the created logical device.
+ */
+struct QueueTopology {
+  /** @brief Queue-family indices selected during physical-device selection. */
+  QueueFamilyIndices families;
+  /** @brief Graphics queue handle. */
+  vk::Queue graphics_queue = VK_NULL_HANDLE;
+  /** @brief Optional asynchronous compute queue handle. */
+  std::optional<vk::Queue> async_compute_queue;
+  /** @brief Optional transfer queue handle. */
+  std::optional<vk::Queue> transfer_queue;
+  /** @brief True when async compute queue is non-graphics dedicated. */
+  bool has_dedicated_async_compute = false;
+  /** @brief True when transfer queue excludes graphics+compute flags. */
+  bool has_dedicated_transfer = false;
+};
+
+/**
  * @brief Requested device-profile capabilities before physical-device selection.
  */
 struct DeviceProfileRequest {
@@ -155,6 +173,12 @@ public:
   [[nodiscard]] const QueueFamilyIndices &queue_family_indices() const noexcept;
 
   /**
+   * @brief Access resolved queue topology for the logical device.
+   * @return Immutable queue topology.
+   */
+  [[nodiscard]] const QueueTopology &queue_topology() const noexcept;
+
+  /**
    * @brief Access graphics queue handle.
    * @return Graphics queue handle.
    */
@@ -191,7 +215,7 @@ private:
   EngineContext(vk::raii::Context &&context, vk::raii::Instance &&instance, vk::raii::DebugUtilsMessengerEXT &&debug_messenger,
                 vk::raii::PhysicalDevice &&physical_device, vk::raii::Device &&device, QueueFamilyIndices queue_family_indices, vk::Queue graphics_queue,
                 std::optional<vk::Queue> async_compute_queue, std::optional<vk::Queue> transfer_queue, bool validation_enabled,
-                DeviceProfile device_profile);
+                QueueTopology queue_topology, DeviceProfile device_profile);
 
   vk::raii::Context context_;
   vk::raii::Instance instance_{nullptr};
@@ -203,6 +227,7 @@ private:
   std::optional<vk::Queue> async_compute_queue_;
   std::optional<vk::Queue> transfer_queue_;
   bool validation_enabled_ = false;
+  QueueTopology queue_topology_{};
   DeviceProfile device_profile_{};
 };
 
