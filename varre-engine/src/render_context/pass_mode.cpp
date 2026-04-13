@@ -743,6 +743,14 @@ void PassCommandEncoder::set_cull_mode(const vk::CullModeFlags cull_mode) const 
   command_buffer_.setCullMode(cull_mode);
 }
 
+void PassCommandEncoder::set_polygon_mode(const vk::PolygonMode polygon_mode) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_polygon_mode");
+  if (command_dispatch_.cmd_set_polygon_mode_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set polygon mode because vkCmdSetPolygonModeEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_polygon_mode_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<VkPolygonMode>(polygon_mode));
+}
+
 void PassCommandEncoder::set_front_face(const vk::FrontFace front_face) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_front_face");
   command_buffer_.setFrontFace(front_face);
@@ -1018,6 +1026,7 @@ PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecuto
   const auto load_device_proc = [&](const char *name) -> PFN_vkVoidFunction { return vkGetDeviceProcAddr(static_cast<VkDevice>(*engine.device()), name); };
   const PassCommandDispatch command_dispatch{
     .cmd_bind_shaders_ext = reinterpret_cast<PFN_vkCmdBindShadersEXT>(load_device_proc("vkCmdBindShadersEXT")),
+    .cmd_set_polygon_mode_ext = reinterpret_cast<PFN_vkCmdSetPolygonModeEXT>(load_device_proc("vkCmdSetPolygonModeEXT")),
     .cmd_set_logic_op_enable_ext = reinterpret_cast<PFN_vkCmdSetLogicOpEnableEXT>(load_device_proc("vkCmdSetLogicOpEnableEXT")),
     .cmd_set_color_blend_enable_ext = reinterpret_cast<PFN_vkCmdSetColorBlendEnableEXT>(load_device_proc("vkCmdSetColorBlendEnableEXT")),
     .cmd_set_color_blend_equation_ext = reinterpret_cast<PFN_vkCmdSetColorBlendEquationEXT>(load_device_proc("vkCmdSetColorBlendEquationEXT")),
@@ -1027,7 +1036,8 @@ PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecuto
     .cmd_set_alpha_to_coverage_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToCoverageEnableEXT>(load_device_proc("vkCmdSetAlphaToCoverageEnableEXT")),
     .cmd_set_alpha_to_one_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToOneEnableEXT>(load_device_proc("vkCmdSetAlphaToOneEnableEXT")),
   };
-  if (command_dispatch.cmd_bind_shaders_ext == nullptr || command_dispatch.cmd_set_logic_op_enable_ext == nullptr ||
+  if (command_dispatch.cmd_bind_shaders_ext == nullptr || command_dispatch.cmd_set_polygon_mode_ext == nullptr ||
+      command_dispatch.cmd_set_logic_op_enable_ext == nullptr ||
       command_dispatch.cmd_set_color_blend_enable_ext == nullptr || command_dispatch.cmd_set_color_blend_equation_ext == nullptr ||
       command_dispatch.cmd_set_color_write_mask_ext == nullptr || command_dispatch.cmd_set_rasterization_samples_ext == nullptr ||
       command_dispatch.cmd_set_sample_mask_ext == nullptr || command_dispatch.cmd_set_alpha_to_coverage_enable_ext == nullptr ||

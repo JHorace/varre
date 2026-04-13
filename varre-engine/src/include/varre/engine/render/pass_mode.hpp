@@ -218,6 +218,8 @@ struct PassShaderBinding {
 struct PassCommandDispatch {
   /** @brief `vkCmdBindShadersEXT` function pointer. */
   PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext = nullptr;
+  /** @brief `vkCmdSetPolygonModeEXT` function pointer. */
+  PFN_vkCmdSetPolygonModeEXT cmd_set_polygon_mode_ext = nullptr;
   /** @brief `vkCmdSetLogicOpEnableEXT` function pointer. */
   PFN_vkCmdSetLogicOpEnableEXT cmd_set_logic_op_enable_ext = nullptr;
   /** @brief `vkCmdSetColorBlendEnableEXT` function pointer. */
@@ -302,6 +304,12 @@ public:
    * @param cull_mode Cull mode.
    */
   void set_cull_mode(vk::CullModeFlags cull_mode) const;
+
+  /**
+   * @brief Set dynamic polygon mode.
+   * @param polygon_mode Polygon mode.
+   */
+  void set_polygon_mode(vk::PolygonMode polygon_mode) const;
 
   /**
    * @brief Set dynamic front-face winding.
