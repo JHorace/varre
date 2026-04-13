@@ -155,8 +155,18 @@ int main() {
       varre::assets::ShaderId::SHADER_TRIANGLE_VERTEX_VERTMAIN,
       varre::assets::ShaderId::SHADER_TRIANGLE_FRAGMENT_FRAGMAIN,
     };
+    const std::array<varre::engine::ShaderObjectCreateEntryById, 2> triangle_shader_entries{
+      varre::engine::ShaderObjectCreateEntryById{
+        .shader_id = triangle_shader_ids[0],
+        .next_stage = vk::ShaderStageFlagBits::eFragment,
+      },
+      varre::engine::ShaderObjectCreateEntryById{
+        .shader_id = triangle_shader_ids[1],
+        .next_stage = {},
+      },
+    };
     const varre::engine::ShaderObjectSet triangle_shader_set = shader_cache.get_or_create(varre::engine::ShaderObjectCreateRequestById{
-      .shader_ids = std::span<const varre::assets::ShaderId>{triangle_shader_ids},
+      .shaders = triangle_shader_entries,
       .push_constant_ranges = {},
       .shader_create_flags = {},
     });
