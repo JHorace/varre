@@ -60,6 +60,40 @@ void validate_unique_shader_view_stages(const std::span<const varre::assets::Sha
 [[nodiscard]] std::uint64_t pipeline_layout_handle_token(const vk::PipelineLayout pipeline_layout) {
   return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(static_cast<VkPipelineLayout>(pipeline_layout)));
 }
+
+/**
+ * @brief Default permissive next-stage mask for shader-object creation.
+ * @param stage Shader stage being created.
+ * @return Stage mask suitable for `VkShaderCreateInfoEXT::nextStage`.
+ */
+[[nodiscard]] vk::ShaderStageFlags default_next_stage_mask(const vk::ShaderStageFlagBits stage) {
+  switch (stage) {
+  case vk::ShaderStageFlagBits::eVertex:
+    return vk::ShaderStageFlagBits::eTessellationControl | vk::ShaderStageFlagBits::eTessellationEvaluation | vk::ShaderStageFlagBits::eGeometry |
+           vk::ShaderStageFlagBits::eFragment;
+  case vk::ShaderStageFlagBits::eTessellationControl:
+    return vk::ShaderStageFlagBits::eTessellationEvaluation;
+  case vk::ShaderStageFlagBits::eTessellationEvaluation:
+    return vk::ShaderStageFlagBits::eGeometry | vk::ShaderStageFlagBits::eFragment;
+  case vk::ShaderStageFlagBits::eGeometry:
+    return vk::ShaderStageFlagBits::eFragment;
+  case vk::ShaderStageFlagBits::eTaskEXT:
+    return vk::ShaderStageFlagBits::eMeshEXT | vk::ShaderStageFlagBits::eFragment;
+  case vk::ShaderStageFlagBits::eMeshEXT:
+    return vk::ShaderStageFlagBits::eFragment;
+  case vk::ShaderStageFlagBits::eFragment:
+  case vk::ShaderStageFlagBits::eCompute:
+  case vk::ShaderStageFlagBits::eRaygenKHR:
+  case vk::ShaderStageFlagBits::eAnyHitKHR:
+  case vk::ShaderStageFlagBits::eClosestHitKHR:
+  case vk::ShaderStageFlagBits::eMissKHR:
+  case vk::ShaderStageFlagBits::eIntersectionKHR:
+  case vk::ShaderStageFlagBits::eCallableKHR:
+    return vk::ShaderStageFlags{};
+  default:
+    return vk::ShaderStageFlags{};
+  }
+}
 } // namespace detail
 
 vk::ShaderStageFlagBits to_vk_shader_stage(const varre::assets::ShaderStage stage) {
@@ -122,7 +156,7 @@ vk::ShaderEXT ShaderObjectCache::get_or_create_shader_object(const varre::assets
   const vk::ShaderCreateInfoEXT create_info = vk::ShaderCreateInfoEXT{}
                                                 .setFlags(create_flags)
                                                 .setStage(stage)
-                                                .setNextStage(vk::ShaderStageFlags{})
+                                                .setNextStage(detail::default_next_stage_mask(stage))
                                                 .setCodeType(vk::ShaderCodeTypeEXT::eSpirv)
                                                 .setCodeSize(shader.size)
                                                 .setPCode(static_cast<const void *>(shader.data))
@@ -210,4 +244,3 @@ void bind_shader_set(const PassCommandEncoder &encoder, const std::span<const Sh
 void bind_shader_set(const PassCommandEncoder &encoder, const ShaderObjectSet &shader_set) { bind_shader_set(encoder, shader_set.bindings); }
 
 } // namespace varre::engine
-
