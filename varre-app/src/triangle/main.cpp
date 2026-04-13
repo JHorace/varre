@@ -54,6 +54,7 @@ void record_triangle_draw(varre::engine::PassCommandEncoder &encoder, const vk::
 
   encoder.set_primitive_topology(vk::PrimitiveTopology::eTriangleList);
   encoder.set_polygon_mode(vk::PolygonMode::eFill);
+  encoder.set_vertex_input(std::span<const vk::VertexInputBindingDescription2EXT>{}, std::span<const vk::VertexInputAttributeDescription2EXT>{});
   encoder.set_rasterizer_discard_enable(false);
   encoder.set_cull_mode(vk::CullModeFlagBits::eNone);
   encoder.set_front_face(vk::FrontFace::eCounterClockwise);
