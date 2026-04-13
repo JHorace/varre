@@ -2,6 +2,6 @@ target_sources(
   varre_engine
   PRIVATE
     models.cpp
-    shaders.cpp
+    shader_objects.cpp
     textures.cpp
 )

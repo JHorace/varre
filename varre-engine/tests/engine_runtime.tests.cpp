@@ -14,7 +14,7 @@
 #include "varre/assets/models.hpp"
 #include "varre/assets/shaders.hpp"
 #include "varre/engine/assets/models.hpp"
-#include "varre/engine/assets/shaders.hpp"
+#include "varre/engine/assets/shader_objects.hpp"
 #include "varre/engine/core/engine.hpp"
 #include "varre/engine/core/errors.hpp"
 #include "varre/engine/core/surface.hpp"
