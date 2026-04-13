@@ -96,6 +96,10 @@ Use this sequence when implementing `varre-engine` internals.
 4. Render contexts (`triangle`, then `mesh_simple`).
 5. Test hardening and resize/recreate edge cases.
 
+## Deferred Cleanup Plan
+- Post-app-migration engine structure/naming cleanup is recorded in `docs/post_app_migration_engine_cleanup.md`.
+- Keep this deferred until app migration is complete unless explicitly requested otherwise.
+
 ## Implementation Rules
 - Implement CMake structure first, then target internals.
 - Preserve nested module/subproject layout when adding targets.

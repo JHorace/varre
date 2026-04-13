@@ -79,6 +79,10 @@ ctest --test-dir build --output-on-failure
 - `varre-app/` app module scaffolding
 - `cmake/` shared CMake options/modules
 
+## Deferred Plan
+
+- Post-app-migration engine structure cleanup is tracked in `docs/post_app_migration_engine_cleanup.md`.
+
 ## Notes
 
 This is an active conversion workspace, not a feature-complete engine yet. APIs, targets, and generated outputs may evolve as Rust functionality is progressively ported to C++.
