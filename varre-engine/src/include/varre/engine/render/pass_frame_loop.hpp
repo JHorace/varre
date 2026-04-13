@@ -26,6 +26,8 @@ struct PassFrameContext {
   std::uint32_t frame_index = 0U;
   /** @brief Swapchain image index acquired for this frame. */
   std::uint32_t image_index = 0U;
+  /** @brief Stable pass resource ID for the acquired swapchain image. */
+  PassResourceId swapchain_resource_id = 0U;
   /** @brief Swapchain extent for this frame. */
   vk::Extent2D extent{};
   /** @brief Swapchain image format for this frame. */

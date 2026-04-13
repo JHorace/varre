@@ -4,6 +4,8 @@
  */
 #include "varre/engine/render/pass_frame_loop.hpp"
 
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include <fmt/format.h>
@@ -11,6 +13,92 @@
 #include "varre/engine/core/errors.hpp"
 
 namespace varre::engine {
+namespace detail {
+constexpr PassResourceId kInternalSwapchainPresentResourceIdBase = 0xFFFF'0000'0000'0000ULL;
+constexpr std::string_view kInternalPresentTransitionPhaseName = "__varre_present_transition";
+
+void validate_swapchain_resource_id_usage(const PassGraph &graph, const PassFrameContext &frame_context) {
+  const auto validate_swapchain_resource = [&](const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const vk::Image image,
+                                               const std::string_view usage_label) {
+    if (image != frame_context.image) {
+      return;
+    }
+    if (resource_id != frame_context.swapchain_resource_id) {
+      throw make_engine_error(
+        EngineErrorCode::kInvalidArgument,
+        fmt::format("Phase '{}' uses swapchain image in {} with resource id {} but frame-context swapchain_resource_id is {}.",
+                    phase_desc.name, usage_label, resource_id, frame_context.swapchain_resource_id));
+    }
+  };
+
+  for (const PassPhase &phase : graph.phases()) {
+    for (const PassImageAccess &image_access : phase.description.image_accesses) {
+      validate_swapchain_resource(phase.description, image_access.resource_id, image_access.image, "PassImageAccess");
+    }
+
+    if (!phase.description.graphics_rendering.has_value()) {
+      continue;
+    }
+
+    const PassGraphicsRenderingInfo &rendering = *phase.description.graphics_rendering;
+    for (const PassColorAttachmentDesc &color_attachment : rendering.color_attachments) {
+      validate_swapchain_resource(phase.description, color_attachment.resource_id, color_attachment.image, "color attachment");
+      if (color_attachment.resolve_image_view != VK_NULL_HANDLE && color_attachment.resolve_mode != vk::ResolveModeFlagBits::eNone) {
+        validate_swapchain_resource(phase.description, color_attachment.resolve_resource_id, color_attachment.resolve_image, "resolve attachment");
+      }
+    }
+
+    if (rendering.depth_attachment.has_value()) {
+      const PassDepthAttachmentDesc &depth_attachment = *rendering.depth_attachment;
+      validate_swapchain_resource(phase.description, depth_attachment.resource_id, depth_attachment.image, "depth attachment");
+    }
+    if (rendering.stencil_attachment.has_value()) {
+      const PassDepthAttachmentDesc &stencil_attachment = *rendering.stencil_attachment;
+      validate_swapchain_resource(phase.description, stencil_attachment.resource_id, stencil_attachment.image, "stencil attachment");
+    }
+  }
+}
+
+void append_present_transition_phase(PassGraph *graph, const PassFrameContext &frame_context) {
+  if (graph == nullptr || graph->empty()) {
+    return;
+  }
+
+  std::vector<PassPhaseId> dependencies;
+  dependencies.reserve(graph->size());
+  for (PassPhaseId phase_id = 0U; phase_id < static_cast<PassPhaseId>(graph->size()); ++phase_id) {
+    dependencies.push_back(phase_id);
+  }
+
+  static_cast<void>(graph->add_phase(
+    PassPhaseDesc{
+      .name = std::string{kInternalPresentTransitionPhaseName},
+      .kind = PassPhaseKind::kTransfer,
+      .queue = PassQueueKind::kGraphics,
+      .explicit_dependencies = std::move(dependencies),
+      .buffer_accesses = {},
+      .image_accesses =
+        {
+          PassImageAccess{
+            .resource_id = frame_context.swapchain_resource_id,
+            .image = frame_context.image,
+            .subresource_range =
+              vk::ImageSubresourceRange{}
+                .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                .setBaseMipLevel(0U)
+                .setLevelCount(1U)
+                .setBaseArrayLayer(0U)
+                .setLayerCount(1U),
+            .stage_mask = vk::PipelineStageFlagBits2::eAllCommands,
+            .access_mask = vk::AccessFlagBits2::eMemoryRead,
+            .writes = false,
+          },
+        },
+      .graphics_rendering = std::nullopt,
+    },
+    [](PassCommandEncoder & /*encoder*/) {}));
+}
+} // namespace detail
 
 PassFrameLoop::PassFrameLoop(FrameLoop &&frame_loop, PassExecutor &&pass_executor)
     : frame_loop_(std::move(frame_loop)), pass_executor_(std::move(pass_executor)) {}
@@ -26,6 +114,9 @@ PassFrameLoop PassFrameLoop::create(const EngineContext &engine, const Swapchain
 bool PassFrameLoop::try_recreate_swapchain(SwapchainContext *swapchain, const PassFrameRunInfo &run_info) {
   const bool recreated =
     run_info.recreate_info.has_value() ? frame_loop_.try_recreate_swapchain(swapchain, *run_info.recreate_info) : frame_loop_.try_recreate_swapchain(swapchain);
+  if (recreated) {
+    pass_executor_.reset_tracked_image_states();
+  }
   if (recreated && run_info.on_swapchain_recreated) {
     run_info.on_swapchain_recreated(*swapchain);
   }
@@ -68,16 +159,18 @@ PassFrameRunResult PassFrameLoop::run_frame(SwapchainContext *swapchain, const P
     throw make_engine_error(EngineErrorCode::kInvalidState, "PassFrameLoop could not resolve acquired swapchain image/image_view.");
   }
 
-  build_graph(
-    PassFrameContext{
-      .frame_index = acquired.frame_index,
-      .image_index = acquired.image_index,
-      .extent = swapchain->extent(),
-      .image_format = swapchain->image_format(),
-      .image = images[acquired.image_index],
-      .image_view = *image_views[acquired.image_index],
-    },
-    &graph);
+  const PassFrameContext frame_context{
+    .frame_index = acquired.frame_index,
+    .image_index = acquired.image_index,
+    .swapchain_resource_id = detail::kInternalSwapchainPresentResourceIdBase + static_cast<PassResourceId>(acquired.image_index),
+    .extent = swapchain->extent(),
+    .image_format = swapchain->image_format(),
+    .image = images[acquired.image_index],
+    .image_view = *image_views[acquired.image_index],
+  };
+  build_graph(frame_context, &graph);
+  detail::validate_swapchain_resource_id_usage(graph, frame_context);
+  detail::append_present_transition_phase(&graph, frame_context);
 
   if (graph.empty()) {
     frame_loop_.submit_graphics_batch(GraphicsSubmitBatch{
@@ -89,6 +182,21 @@ PassFrameRunResult PassFrameLoop::run_frame(SwapchainContext *swapchain, const P
       .signal_render_finished = true,
     });
   } else {
+    pass_executor_.prime_tracked_image_state(
+      frame_context.swapchain_resource_id,
+      frame_context.image,
+      vk::ImageSubresourceRange{}
+        .setAspectMask(vk::ImageAspectFlagBits::eColor)
+        .setBaseMipLevel(0U)
+        .setLevelCount(1U)
+        .setBaseArrayLayer(0U)
+        .setLayerCount(1U),
+      vk::ImageLayout::eGeneral,
+      vk::PipelineStageFlagBits2::eAllCommands,
+      vk::AccessFlagBits2::eMemoryWrite,
+      true,
+      VK_QUEUE_FAMILY_IGNORED);
+
     const FrameSyncPrimitives &sync = frame_loop_.current_sync();
     PassExecutionInfo execution_info{
       .waits =

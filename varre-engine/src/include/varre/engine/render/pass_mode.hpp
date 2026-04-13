@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <vulkan/vulkan_raii.hpp>
@@ -19,6 +20,7 @@
 namespace varre::engine {
 
 class EngineContext;
+class PassFrameLoop;
 
 /**
  * @brief Stable identifier for one declared pass resource.
@@ -93,14 +95,7 @@ struct PassImageAccess {
   /** @brief Image subresource range used for generated barriers. */
   vk::ImageSubresourceRange subresource_range =
     vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eColor).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
-  /**
-   * @brief Expected image layout during this phase usage.
-   *
-   * Pass scheduling assumes unified image layouts are enabled and treats
-   * non-present layouts as `eGeneral` for runtime transition emission.
-   */
-  vk::ImageLayout layout = vk::ImageLayout::eGeneral;
-  /** @brief Pipeline stage mask where this phase accesses the image. */
+  /** @brief Pipeline stage mask where this phase accesses the image (non-present layout is engine-managed as `eGeneral`). */
   vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
   /** @brief Access mask for this phase usage. */
   vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
@@ -112,20 +107,30 @@ struct PassImageAccess {
  * @brief Dynamic rendering color attachment declaration.
  */
 struct PassColorAttachmentDesc {
+  /** @brief Logical resource identifier for the color target image (used for auto-derived image access). */
+  PassResourceId resource_id = 0U;
+  /** @brief Vulkan image handle used for synchronization/barrier emission. */
+  vk::Image image = VK_NULL_HANDLE;
+  /** @brief Image subresource range used for synchronization/barrier emission. */
+  vk::ImageSubresourceRange subresource_range =
+    vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eColor).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
   /** @brief Target image view for dynamic rendering. */
   vk::ImageView image_view = VK_NULL_HANDLE;
-  /** @brief Layout used for @ref image_view during rendering. */
-  vk::ImageLayout image_layout = vk::ImageLayout::eColorAttachmentOptimal;
-  /** @brief Attachment load operation. */
+  /** @brief Attachment load operation (layout is engine-managed as `vk::ImageLayout::eGeneral`). */
   vk::AttachmentLoadOp load_op = vk::AttachmentLoadOp::eLoad;
   /** @brief Attachment store operation. */
   vk::AttachmentStoreOp store_op = vk::AttachmentStoreOp::eStore;
   /** @brief Optional clear value used when `load_op == eClear`. */
   std::optional<vk::ClearValue> clear_value;
+  /** @brief Logical resource identifier for the optional resolve target image (used for auto-derived image access). */
+  PassResourceId resolve_resource_id = 0U;
+  /** @brief Vulkan resolve image handle used for synchronization/barrier emission. */
+  vk::Image resolve_image = VK_NULL_HANDLE;
+  /** @brief Resolve image subresource range used for synchronization/barrier emission. */
+  vk::ImageSubresourceRange resolve_subresource_range =
+    vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eColor).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
   /** @brief Optional resolve image view. */
   vk::ImageView resolve_image_view = VK_NULL_HANDLE;
-  /** @brief Layout used for @ref resolve_image_view when present. */
-  vk::ImageLayout resolve_image_layout = vk::ImageLayout::eColorAttachmentOptimal;
   /** @brief Resolve mode for this attachment. */
   vk::ResolveModeFlagBits resolve_mode = vk::ResolveModeFlagBits::eNone;
 };
@@ -134,11 +139,16 @@ struct PassColorAttachmentDesc {
  * @brief Dynamic rendering depth/stencil attachment declaration.
  */
 struct PassDepthAttachmentDesc {
+  /** @brief Logical resource identifier for the depth/stencil target image (used for auto-derived image access). */
+  PassResourceId resource_id = 0U;
+  /** @brief Vulkan image handle used for synchronization/barrier emission. */
+  vk::Image image = VK_NULL_HANDLE;
+  /** @brief Image subresource range used for synchronization/barrier emission. */
+  vk::ImageSubresourceRange subresource_range =
+    vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eDepth).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
   /** @brief Target image view for depth/stencil attachment. */
   vk::ImageView image_view = VK_NULL_HANDLE;
-  /** @brief Layout used for @ref image_view during rendering. */
-  vk::ImageLayout image_layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
-  /** @brief Attachment load operation. */
+  /** @brief Attachment load operation (layout is engine-managed as `vk::ImageLayout::eGeneral`). */
   vk::AttachmentLoadOp load_op = vk::AttachmentLoadOp::eLoad;
   /** @brief Attachment store operation. */
   vk::AttachmentStoreOp store_op = vk::AttachmentStoreOp::eStore;
@@ -178,7 +188,11 @@ struct PassPhaseDesc {
   std::vector<PassPhaseId> explicit_dependencies;
   /** @brief Declared buffer accesses for dependency + barrier generation. */
   std::vector<PassBufferAccess> buffer_accesses;
-  /** @brief Declared image accesses for dependency + barrier generation. */
+  /**
+   * @brief Explicit image accesses for dependency + barrier generation.
+   *
+   * Graphics attachment accesses are auto-derived from @ref graphics_rendering.
+   */
   std::vector<PassImageAccess> image_accesses;
   /**
    * @brief Dynamic rendering metadata.
@@ -677,7 +691,23 @@ public:
    */
   void wait_idle() const;
 
+  /**
+   * @brief Reset executor-tracked image usage history.
+   *
+   * Use when image identity changes under stable resource IDs (for example after swapchain recreation).
+   */
+  void reset_tracked_image_states();
+
 private:
+  friend class PassFrameLoop;
+
+  /**
+   * @brief Prime one tracked image state used by the next execute() call.
+   */
+  void prime_tracked_image_state(PassResourceId resource_id, vk::Image image, vk::ImageSubresourceRange subresource_range, vk::ImageLayout layout,
+                                 vk::PipelineStageFlags2 stage_mask, vk::AccessFlags2 access_mask, bool writes,
+                                 std::uint32_t queue_family_index = VK_QUEUE_FAMILY_IGNORED);
+
   /**
    * @brief Queue runtime resources.
    */
@@ -686,6 +716,19 @@ private:
     std::uint32_t family_index = 0U;
     vk::Queue queue = VK_NULL_HANDLE;
     vk::raii::CommandPool command_pool{nullptr};
+  };
+
+  /**
+   * @brief Persisted image usage state from previous execute() calls.
+   */
+  struct TrackedImageState {
+    std::uint32_t queue_family_index = VK_QUEUE_FAMILY_IGNORED;
+    vk::Image image = VK_NULL_HANDLE;
+    vk::ImageSubresourceRange subresource_range = vk::ImageSubresourceRange{};
+    vk::ImageLayout layout = vk::ImageLayout::eGeneral;
+    vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
+    vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
+    bool writes = false;
   };
 
   /**
@@ -712,6 +755,7 @@ private:
   std::uint64_t completed_timeline_value_ = 0U;
   PassExecutorCreateInfo create_info_{};
   PassCommandDispatch command_dispatch_{};
+  std::unordered_map<PassResourceId, TrackedImageState> tracked_image_states_;
 };
 
 } // namespace varre::engine

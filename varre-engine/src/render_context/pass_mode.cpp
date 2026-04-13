@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <ranges>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -21,6 +22,9 @@
 
 namespace varre::engine {
 namespace detail {
+void validate_phase_id(PassPhaseId phase_id, std::size_t phase_count, std::string_view context);
+constexpr std::string_view kInternalPresentTransitionPhaseName = "__varre_present_transition";
+
 /**
  * @brief Whether one extension is present in resolved device profile.
  * @param profile Resolved engine device profile.
@@ -51,6 +55,542 @@ namespace detail {
  */
 [[nodiscard]] bool layout_transition_required(const vk::ImageLayout old_layout, const vk::ImageLayout new_layout) {
   return canonical_pass_image_layout(old_layout) != canonical_pass_image_layout(new_layout);
+}
+
+/**
+ * @brief Whether one phase is the engine-internal swapchain present transition phase.
+ * @param phase_desc Phase description.
+ * @return `true` when phase is the internal present transition phase.
+ */
+[[nodiscard]] bool is_internal_present_transition_phase(const PassPhaseDesc &phase_desc) {
+  return phase_desc.name == kInternalPresentTransitionPhaseName;
+}
+
+/**
+ * @brief Resolve requested image layout for one phase image access.
+ * @param phase_desc Phase description.
+ * @return `ePresentSrcKHR` for internal present transition phase, otherwise `eGeneral`.
+ */
+[[nodiscard]] vk::ImageLayout image_access_layout_for_phase(const PassPhaseDesc &phase_desc) {
+  const bool is_present_transition =
+    is_internal_present_transition_phase(phase_desc) && phase_desc.kind == PassPhaseKind::kTransfer && phase_desc.buffer_accesses.empty() &&
+    phase_desc.image_accesses.size() == 1U && !phase_desc.graphics_rendering.has_value();
+  return is_present_transition ? vk::ImageLayout::ePresentSrcKHR : vk::ImageLayout::eGeneral;
+}
+
+enum class ResourceKind : std::uint8_t {
+  kBuffer = 0U,
+  kImage,
+};
+
+struct BufferUsageState {
+  std::size_t phase_index = 0U;
+  std::uint32_t queue_family_index = 0U;
+  vk::Buffer buffer = VK_NULL_HANDLE;
+  vk::DeviceSize offset = 0U;
+  vk::DeviceSize size = VK_WHOLE_SIZE;
+  vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
+  vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
+  bool writes = false;
+};
+
+struct ImageUsageState {
+  std::size_t phase_index = 0U;
+  std::uint32_t queue_family_index = 0U;
+  vk::Image image = VK_NULL_HANDLE;
+  vk::ImageSubresourceRange subresource_range = vk::ImageSubresourceRange{};
+  vk::ImageLayout layout = vk::ImageLayout::eGeneral;
+  vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
+  vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
+  bool writes = false;
+};
+
+void validate_phase_queue_request(const PassPhaseDesc &phase_desc) {
+#ifndef NDEBUG
+  switch (phase_desc.kind) {
+  case PassPhaseKind::kGraphics:
+    if (phase_desc.queue != PassQueueKind::kAuto && phase_desc.queue != PassQueueKind::kGraphics) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Phase '{}' is graphics but requested unsupported queue kind {}.", phase_desc.name,
+                                          static_cast<int>(phase_desc.queue)));
+    }
+    return;
+  case PassPhaseKind::kCompute:
+    if (phase_desc.queue == PassQueueKind::kTransfer) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Phase '{}' is compute but requested transfer queue.", phase_desc.name));
+    }
+    return;
+  case PassPhaseKind::kTransfer:
+    if (phase_desc.queue == PassQueueKind::kAsyncCompute) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Phase '{}' is transfer but requested async compute queue.", phase_desc.name));
+    }
+    return;
+  default:
+    return;
+  }
+#else
+  (void)phase_desc;
+#endif
+}
+
+void validate_phase_definition(const PassPhase &phase, const std::size_t phase_index) {
+#ifndef NDEBUG
+  if (phase.description.name.empty()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase at index {} must provide a non-empty diagnostic name.", phase_index));
+  }
+  if (phase.description.name.starts_with("__varre_") && !is_internal_present_transition_phase(phase.description)) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' uses reserved '__varre_' name prefix.", phase.description.name));
+  }
+  if (is_internal_present_transition_phase(phase.description)) {
+    if (phase.description.kind != PassPhaseKind::kTransfer || phase.description.buffer_accesses.size() > 0U ||
+        phase.description.image_accesses.size() != 1U || phase.description.graphics_rendering.has_value()) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Phase '{}' is reserved for engine-managed swapchain present transitions.", phase.description.name));
+    }
+  }
+  if (!phase.record) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' does not provide a recording callback.", phase.description.name));
+  }
+  if (phase.description.kind == PassPhaseKind::kGraphics) {
+    if (!phase.description.graphics_rendering.has_value()) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' must provide PassGraphicsRenderingInfo.", phase.description.name));
+    }
+    if (phase.description.graphics_rendering->layer_count == 0U) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' has layer_count=0, which is invalid.", phase.description.name));
+    }
+    if (phase.description.graphics_rendering->render_area.extent.width == 0U || phase.description.graphics_rendering->render_area.extent.height == 0U) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' has render_area extent {}x{}, but both dimensions must be non-zero.", phase.description.name,
+                                          phase.description.graphics_rendering->render_area.extent.width,
+                                          phase.description.graphics_rendering->render_area.extent.height));
+    }
+    if (phase.description.graphics_rendering->color_attachments.empty() && !phase.description.graphics_rendering->depth_attachment.has_value() &&
+        !phase.description.graphics_rendering->stencil_attachment.has_value()) {
+      throw make_engine_error(
+        EngineErrorCode::kInvalidArgument,
+        fmt::format("Graphics phase '{}' must provide at least one color/depth/stencil attachment for dynamic rendering.", phase.description.name));
+    }
+    return;
+  }
+  if (phase.description.graphics_rendering.has_value()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Non-graphics phase '{}' cannot provide graphics_rendering metadata.", phase.description.name));
+  }
+#else
+  (void)phase;
+  (void)phase_index;
+#endif
+}
+
+void validate_phase_dependency(const PassPhaseDesc &phase_desc, const PassPhaseId dependency_phase_id, const std::size_t phase_index,
+                               const std::size_t phase_count) {
+#ifndef NDEBUG
+  validate_phase_id(dependency_phase_id, phase_count, "PassPhaseDesc.explicit_dependencies");
+  if (dependency_phase_id >= phase_index) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' dependency on phase id {} must refer to an earlier phase.", phase_desc.name, dependency_phase_id));
+  }
+#else
+  (void)phase_desc;
+  (void)dependency_phase_id;
+  (void)phase_index;
+  (void)phase_count;
+#endif
+}
+
+void validate_buffer_access(const PassPhaseDesc &phase_desc, const PassBufferAccess &buffer_access) {
+#ifndef NDEBUG
+  if (buffer_access.resource_id == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassBufferAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase_desc.name));
+  }
+  if (buffer_access.buffer == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassBufferAccess with VK_NULL_HANDLE.", phase_desc.name));
+  }
+  if (buffer_access.stage_mask == vk::PipelineStageFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with empty stage_mask.", phase_desc.name,
+                                        buffer_access.resource_id));
+  }
+  if (buffer_access.writes && buffer_access.access_mask == vk::AccessFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains writable PassBufferAccess for resource id {} with empty access_mask.", phase_desc.name,
+                                        buffer_access.resource_id));
+  }
+  if (buffer_access.size == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with size=0.", phase_desc.name, buffer_access.resource_id));
+  }
+  if (buffer_access.size != VK_WHOLE_SIZE && buffer_access.offset > (std::numeric_limits<vk::DeviceSize>::max() - buffer_access.size)) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with offset+size overflow.", phase_desc.name,
+                                        buffer_access.resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)buffer_access;
+#endif
+}
+
+void validate_unique_buffer_phase_resource(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const bool inserted) {
+#ifndef NDEBUG
+  if (!inserted) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' declares duplicate PassBufferAccess resource id {} within the same phase.", phase_desc.name, resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)inserted;
+#endif
+}
+
+void validate_buffer_resource_kind(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const ResourceKind existing_kind) {
+#ifndef NDEBUG
+  if (existing_kind != ResourceKind::kBuffer) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
+                                        phase_desc.name, resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)existing_kind;
+#endif
+}
+
+void validate_buffer_state_compatibility(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const BufferUsageState &previous_state,
+                                         const PassBufferAccess &buffer_access) {
+#ifndef NDEBUG
+  if (previous_state.buffer != buffer_access.buffer || previous_state.offset != buffer_access.offset || previous_state.size != buffer_access.size) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' reused buffer resource id {} with a different handle/range. Use separate resource IDs.", phase_desc.name,
+                                        resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)previous_state;
+  (void)buffer_access;
+#endif
+}
+
+void validate_image_access(const PassPhaseDesc &phase_desc, const PassImageAccess &image_access) {
+#ifndef NDEBUG
+  if (image_access.resource_id == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassImageAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase_desc.name));
+  }
+  if (image_access.image == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess with VK_NULL_HANDLE.", phase_desc.name));
+  }
+  if (image_access.stage_mask == vk::PipelineStageFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty stage_mask.", phase_desc.name,
+                                        image_access.resource_id));
+  }
+  if (image_access.writes && image_access.access_mask == vk::AccessFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains writable PassImageAccess for resource id {} with empty access_mask.", phase_desc.name,
+                                        image_access.resource_id));
+  }
+  if (image_access.subresource_range.aspectMask == vk::ImageAspectFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty aspectMask.", phase_desc.name,
+                                        image_access.resource_id));
+  }
+  if (image_access.subresource_range.levelCount == 0U || image_access.subresource_range.layerCount == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' contains PassImageAccess for resource id {} with zero levelCount/layerCount.", phase_desc.name,
+                                        image_access.resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)image_access;
+#endif
+}
+
+void validate_unique_image_phase_resource(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const bool inserted) {
+#ifndef NDEBUG
+  if (!inserted) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' declares duplicate PassImageAccess resource id {} within the same phase.", phase_desc.name, resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)inserted;
+#endif
+}
+
+void validate_image_resource_kind(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const ResourceKind existing_kind) {
+#ifndef NDEBUG
+  if (existing_kind != ResourceKind::kImage) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
+                                        phase_desc.name, resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)existing_kind;
+#endif
+}
+
+void validate_image_state_compatibility(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const ImageUsageState &previous_state,
+                                        const PassImageAccess &image_access) {
+#ifndef NDEBUG
+  if (previous_state.image != image_access.image || previous_state.subresource_range != image_access.subresource_range) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Phase '{}' reused image resource id {} with a different handle/range. Use separate resource IDs.", phase_desc.name,
+                                        resource_id));
+  }
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)previous_state;
+  (void)image_access;
+#endif
+}
+
+void validate_external_image_queue_transition(const PassPhaseDesc &phase_desc, const PassResourceId resource_id, const std::uint32_t previous_queue_family,
+                                              const std::uint32_t current_queue_family) {
+#ifndef NDEBUG
+  if (previous_queue_family == VK_QUEUE_FAMILY_IGNORED || previous_queue_family == current_queue_family) {
+    return;
+  }
+  throw make_engine_error(
+    EngineErrorCode::kInvalidArgument,
+    fmt::format("Phase '{}' uses image resource id {} on queue family {} after a prior execute() tracked queue family {}. "
+                "Cross-execution queue-family ownership transfers are unsupported; keep image usage on one queue family across execute() calls.",
+                phase_desc.name, resource_id, current_queue_family, previous_queue_family));
+#else
+  (void)phase_desc;
+  (void)resource_id;
+  (void)previous_queue_family;
+  (void)current_queue_family;
+#endif
+}
+
+void validate_external_wait(const PassExternalWait &wait, const std::size_t phase_count) {
+#ifndef NDEBUG
+  validate_phase_id(wait.phase_id, phase_count, "PassExecutionInfo.waits");
+  if (wait.semaphore == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain VK_NULL_HANDLE semaphore.");
+  }
+  if (wait.stage_mask == vk::PipelineStageFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain empty stage_mask.");
+  }
+#else
+  (void)wait;
+  (void)phase_count;
+#endif
+}
+
+void validate_external_signal(const PassExternalSignal &signal, const std::size_t phase_count) {
+#ifndef NDEBUG
+  validate_phase_id(signal.phase_id, phase_count, "PassExecutionInfo.signals");
+  if (signal.semaphore == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain VK_NULL_HANDLE semaphore.");
+  }
+  if (signal.stage_mask == vk::PipelineStageFlags2{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain empty stage_mask.");
+  }
+#else
+  (void)signal;
+  (void)phase_count;
+#endif
+}
+
+void validate_color_attachment(const PassPhaseDesc &phase_desc, const PassColorAttachmentDesc &color_attachment) {
+#ifndef NDEBUG
+  if (color_attachment.resource_id == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains color attachment with resource_id=0.", phase_desc.name));
+  }
+  if (color_attachment.image == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains color attachment with VK_NULL_HANDLE image.", phase_desc.name));
+  }
+  if (color_attachment.image_view == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains color attachment with VK_NULL_HANDLE image_view.", phase_desc.name));
+  }
+  if (color_attachment.subresource_range.aspectMask == vk::ImageAspectFlags{} || color_attachment.subresource_range.levelCount == 0U ||
+      color_attachment.subresource_range.layerCount == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains color attachment with invalid subresource_range.", phase_desc.name));
+  }
+  if (color_attachment.load_op == vk::AttachmentLoadOp::eClear && !color_attachment.clear_value.has_value()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' color attachment uses load_op=eClear but does not provide clear_value.", phase_desc.name));
+  }
+  if (color_attachment.load_op != vk::AttachmentLoadOp::eClear && color_attachment.clear_value.has_value()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' color attachment provides clear_value but load_op is not eClear.", phase_desc.name));
+  }
+  const bool has_resolve_view = color_attachment.resolve_image_view != VK_NULL_HANDLE;
+  const bool has_resolve_mode = color_attachment.resolve_mode != vk::ResolveModeFlagBits::eNone;
+  if (has_resolve_view != has_resolve_mode) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' color attachment resolve_image_view/resolve_mode must either both be set or both be unset.",
+                                        phase_desc.name));
+  }
+  if (has_resolve_view) {
+    if (color_attachment.resolve_resource_id == 0U) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' resolve attachment uses resource_id=0.", phase_desc.name));
+    }
+    if (color_attachment.resolve_image == VK_NULL_HANDLE) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' resolve attachment uses VK_NULL_HANDLE image.", phase_desc.name));
+    }
+    if (color_attachment.resolve_subresource_range.aspectMask == vk::ImageAspectFlags{} || color_attachment.resolve_subresource_range.levelCount == 0U ||
+        color_attachment.resolve_subresource_range.layerCount == 0U) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' resolve attachment has invalid subresource_range.", phase_desc.name));
+    }
+  } else {
+    if (color_attachment.resolve_resource_id != 0U || color_attachment.resolve_image != VK_NULL_HANDLE) {
+      throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                              fmt::format("Graphics phase '{}' sets resolve resource/image without resolve view+mode.", phase_desc.name));
+    }
+  }
+#else
+  (void)phase_desc;
+  (void)color_attachment;
+#endif
+}
+
+void validate_depth_stencil_attachment(const PassPhaseDesc &phase_desc, const PassDepthAttachmentDesc &attachment, const std::string_view label) {
+#ifndef NDEBUG
+  if (attachment.resource_id == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains {} attachment with resource_id=0.", phase_desc.name, label));
+  }
+  if (attachment.image == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains {} attachment with VK_NULL_HANDLE image.", phase_desc.name, label));
+  }
+  if (attachment.image_view == VK_NULL_HANDLE) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains {} attachment with VK_NULL_HANDLE image_view.", phase_desc.name, label));
+  }
+  if (attachment.subresource_range.aspectMask == vk::ImageAspectFlags{} || attachment.subresource_range.levelCount == 0U ||
+      attachment.subresource_range.layerCount == 0U) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' contains {} attachment with invalid subresource_range.", phase_desc.name, label));
+  }
+  if (attachment.load_op == vk::AttachmentLoadOp::eClear && !attachment.clear_value.has_value()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' {} attachment uses load_op=eClear but does not provide clear_value.", phase_desc.name, label));
+  }
+  if (attachment.load_op != vk::AttachmentLoadOp::eClear && attachment.clear_value.has_value()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Graphics phase '{}' {} attachment provides clear_value but load_op is not eClear.", phase_desc.name, label));
+  }
+#else
+  (void)phase_desc;
+  (void)attachment;
+  (void)label;
+#endif
+}
+
+[[nodiscard]] bool has_resolve_target(const PassColorAttachmentDesc &attachment) {
+  return attachment.resolve_image_view != VK_NULL_HANDLE && attachment.resolve_mode != vk::ResolveModeFlagBits::eNone;
+}
+
+void merge_phase_image_access(const PassPhaseDesc &phase_desc, const PassImageAccess &access, std::vector<PassImageAccess> *merged_accesses) {
+  auto existing_it = std::ranges::find_if(*merged_accesses, [&](const PassImageAccess &existing) { return existing.resource_id == access.resource_id; });
+  if (existing_it == merged_accesses->end()) {
+    merged_accesses->push_back(access);
+    return;
+  }
+
+#ifndef NDEBUG
+  if (existing_it->image != access.image || existing_it->subresource_range != access.subresource_range) {
+    throw make_engine_error(
+      EngineErrorCode::kInvalidArgument,
+      fmt::format("Phase '{}' reuses image resource id {} across incompatible image handle/subresource declarations.", phase_desc.name, access.resource_id));
+  }
+#endif
+
+  existing_it->stage_mask |= access.stage_mask;
+  existing_it->access_mask |= access.access_mask;
+  existing_it->writes = existing_it->writes || access.writes;
+}
+
+[[nodiscard]] PassImageAccess make_color_attachment_image_access(const PassColorAttachmentDesc &attachment) {
+  return PassImageAccess{
+    .resource_id = attachment.resource_id,
+    .image = attachment.image,
+    .subresource_range = attachment.subresource_range,
+    .stage_mask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+    .access_mask = vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite,
+    .writes = true,
+  };
+}
+
+[[nodiscard]] PassImageAccess make_resolve_attachment_image_access(const PassColorAttachmentDesc &attachment) {
+  return PassImageAccess{
+    .resource_id = attachment.resolve_resource_id,
+    .image = attachment.resolve_image,
+    .subresource_range = attachment.resolve_subresource_range,
+    .stage_mask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+    .access_mask = vk::AccessFlagBits2::eColorAttachmentWrite,
+    .writes = true,
+  };
+}
+
+[[nodiscard]] PassImageAccess make_depth_stencil_attachment_image_access(const PassDepthAttachmentDesc &attachment) {
+  return PassImageAccess{
+    .resource_id = attachment.resource_id,
+    .image = attachment.image,
+    .subresource_range = attachment.subresource_range,
+    .stage_mask = vk::PipelineStageFlagBits2::eEarlyFragmentTests | vk::PipelineStageFlagBits2::eLateFragmentTests,
+    .access_mask = vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eDepthStencilAttachmentWrite,
+    .writes = true,
+  };
+}
+
+[[nodiscard]] std::vector<PassImageAccess> collect_phase_image_accesses(const PassPhaseDesc &phase_desc) {
+  std::vector<PassImageAccess> image_accesses;
+  image_accesses.reserve(phase_desc.image_accesses.size());
+  for (const PassImageAccess &image_access : phase_desc.image_accesses) {
+    merge_phase_image_access(phase_desc, image_access, &image_accesses);
+  }
+
+  if (phase_desc.kind != PassPhaseKind::kGraphics || !phase_desc.graphics_rendering.has_value()) {
+    return image_accesses;
+  }
+
+  const PassGraphicsRenderingInfo &rendering = *phase_desc.graphics_rendering;
+  image_accesses.reserve(image_accesses.size() + rendering.color_attachments.size() * 2U + (rendering.depth_attachment.has_value() ? 1U : 0U) +
+                         (rendering.stencil_attachment.has_value() ? 1U : 0U));
+
+  for (const PassColorAttachmentDesc &color_attachment : rendering.color_attachments) {
+    validate_color_attachment(phase_desc, color_attachment);
+    merge_phase_image_access(phase_desc, make_color_attachment_image_access(color_attachment), &image_accesses);
+    if (has_resolve_target(color_attachment)) {
+      merge_phase_image_access(phase_desc, make_resolve_attachment_image_access(color_attachment), &image_accesses);
+    }
+  }
+
+  if (rendering.depth_attachment.has_value()) {
+    validate_depth_stencil_attachment(phase_desc, *rendering.depth_attachment, "depth");
+    merge_phase_image_access(phase_desc, make_depth_stencil_attachment_image_access(*rendering.depth_attachment), &image_accesses);
+  }
+  if (rendering.stencil_attachment.has_value()) {
+    validate_depth_stencil_attachment(phase_desc, *rendering.stencil_attachment, "stencil");
+    merge_phase_image_access(phase_desc, make_depth_stencil_attachment_image_access(*rendering.stencil_attachment), &image_accesses);
+  }
+
+  return image_accesses;
 }
 
 /**
@@ -572,10 +1112,12 @@ std::size_t PassExecutor::queue_runtime_index_for(const PassQueueKind queue_kind
 }
 
 void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &execution_info) {
+  // Runtime safety check: execute() requires a fully initialized executor/device pair.
   if (device_ == nullptr || engine_ == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "PassExecutor is not initialized.");
   }
 
+  // Snapshot the pass list for this execution and short-circuit when there is no work.
   const std::span<const PassPhase> phases = graph.phases();
   if (phases.empty()) {
     return;
@@ -591,50 +1133,37 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     std::vector<vk::ImageMemoryBarrier2> post_image_barriers;
   };
 
+  // Per-phase runtime plan (resolved queue + barriers + submit dependencies).
   std::vector<ResolvedPhase> resolved_phases(phases.size());
 
-  struct BufferUsageState {
-    std::size_t phase_index = 0U;
-    std::uint32_t queue_family_index = 0U;
-    vk::Buffer buffer = VK_NULL_HANDLE;
-    vk::DeviceSize offset = 0U;
-    vk::DeviceSize size = VK_WHOLE_SIZE;
-    vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
-    vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
-    bool writes = false;
-  };
+  // Last-seen usage state by logical resource ID, used to derive dependencies/barriers.
+  constexpr std::size_t kExternalUsagePhaseIndex = std::numeric_limits<std::size_t>::max();
+  std::unordered_map<PassResourceId, detail::BufferUsageState> buffer_usage_states;
+  std::unordered_map<PassResourceId, detail::ImageUsageState> image_usage_states;
+  std::unordered_map<PassResourceId, detail::ResourceKind> declared_resource_kinds;
 
-  struct ImageUsageState {
-    std::size_t phase_index = 0U;
-    std::uint32_t queue_family_index = 0U;
-    vk::Image image = VK_NULL_HANDLE;
-    vk::ImageSubresourceRange subresource_range = vk::ImageSubresourceRange{};
-    vk::ImageLayout layout = vk::ImageLayout::eGeneral;
-    vk::PipelineStageFlags2 stage_mask = vk::PipelineStageFlagBits2::eAllCommands;
-    vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eMemoryRead;
-    bool writes = false;
-  };
+  // Seed image usage state from executor-tracked history across execute() calls.
+  for (const auto &[resource_id, tracked_state] : tracked_image_states_) {
+    declared_resource_kinds.emplace(resource_id, detail::ResourceKind::kImage);
+    image_usage_states[resource_id] = detail::ImageUsageState{
+      .phase_index = kExternalUsagePhaseIndex,
+      .queue_family_index = tracked_state.queue_family_index,
+      .image = tracked_state.image,
+      .subresource_range = tracked_state.subresource_range,
+      .layout = tracked_state.layout,
+      .stage_mask = tracked_state.stage_mask,
+      .access_mask = tracked_state.access_mask,
+      .writes = tracked_state.writes,
+    };
+  }
 
-  std::unordered_map<PassResourceId, BufferUsageState> buffer_usage_states;
-  std::unordered_map<PassResourceId, ImageUsageState> image_usage_states;
-  enum class ResourceKind : std::uint8_t {
-    kBuffer = 0U,
-    kImage,
-  };
-  std::unordered_map<PassResourceId, ResourceKind> declared_resource_kinds;
-
+  // Translate phase queue preference into a concrete queue runtime index.
   const auto resolve_queue_runtime_index = [&](const PassPhaseDesc &phase_desc) -> std::size_t {
+    detail::validate_phase_queue_request(phase_desc);
     switch (phase_desc.kind) {
     case PassPhaseKind::kGraphics:
-      if (phase_desc.queue != PassQueueKind::kAuto && phase_desc.queue != PassQueueKind::kGraphics) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' is graphics but requested unsupported queue kind {}.",
-                                                                               phase_desc.name, static_cast<int>(phase_desc.queue)));
-      }
       return queue_runtime_index_for(PassQueueKind::kGraphics);
     case PassPhaseKind::kCompute:
-      if (phase_desc.queue == PassQueueKind::kTransfer) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' is compute but requested transfer queue.", phase_desc.name));
-      }
       if (phase_desc.queue == PassQueueKind::kGraphics) {
         return queue_runtime_index_for(PassQueueKind::kGraphics);
       }
@@ -643,9 +1172,6 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       }
       return queue_runtime_index_for(PassQueueKind::kGraphics);
     case PassPhaseKind::kTransfer:
-      if (phase_desc.queue == PassQueueKind::kAsyncCompute) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' is transfer but requested async compute queue.", phase_desc.name));
-      }
       if (phase_desc.queue == PassQueueKind::kGraphics) {
         return queue_runtime_index_for(PassQueueKind::kGraphics);
       }
@@ -658,107 +1184,43 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     }
   };
 
+  // Pass 1: resolve queue assignment, explicit/implicit dependencies, and synchronization barriers.
   for (std::size_t phase_index = 0; phase_index < phases.size(); ++phase_index) {
     const PassPhase &phase = phases[phase_index];
-    if (phase.description.name.empty()) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase at index {} must provide a non-empty diagnostic name.", phase_index));
-    }
-    if (!phase.record) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' does not provide a recording callback.", phase.description.name));
-    }
-    if (phase.description.kind == PassPhaseKind::kGraphics) {
-      if (!phase.description.graphics_rendering.has_value()) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Graphics phase '{}' must provide PassGraphicsRenderingInfo.", phase.description.name));
-      }
-      if (phase.description.graphics_rendering->layer_count == 0U) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Graphics phase '{}' has layer_count=0, which is invalid.", phase.description.name));
-      }
-      if (phase.description.graphics_rendering->render_area.extent.width == 0U || phase.description.graphics_rendering->render_area.extent.height == 0U) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Graphics phase '{}' has render_area extent {}x{}, but both dimensions must be non-zero.", phase.description.name,
-                                            phase.description.graphics_rendering->render_area.extent.width,
-                                            phase.description.graphics_rendering->render_area.extent.height));
-      }
-      if (phase.description.graphics_rendering->color_attachments.empty() && !phase.description.graphics_rendering->depth_attachment.has_value() &&
-          !phase.description.graphics_rendering->stencil_attachment.has_value()) {
-        throw make_engine_error(
-          EngineErrorCode::kInvalidArgument,
-          fmt::format("Graphics phase '{}' must provide at least one color/depth/stencil attachment for dynamic rendering.", phase.description.name));
-      }
-    } else if (phase.description.graphics_rendering.has_value()) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                              fmt::format("Non-graphics phase '{}' cannot provide graphics_rendering metadata.", phase.description.name));
-    }
+    detail::validate_phase_definition(phase, phase_index);
+    const std::vector<PassImageAccess> phase_image_accesses = detail::collect_phase_image_accesses(phase.description);
 
     std::unordered_set<PassResourceId> phase_buffer_resource_ids;
     phase_buffer_resource_ids.reserve(phase.description.buffer_accesses.size());
     std::unordered_set<PassResourceId> phase_image_resource_ids;
-    phase_image_resource_ids.reserve(phase.description.image_accesses.size());
+    phase_image_resource_ids.reserve(phase_image_accesses.size());
 
     resolved_phases[phase_index].phase = &phase;
     resolved_phases[phase_index].queue_runtime_index = resolve_queue_runtime_index(phase.description);
 
     const std::uint32_t current_queue_family = queue_runtimes_[resolved_phases[phase_index].queue_runtime_index].family_index;
 
+    // Explicit dependencies are preserved and deduplicated.
     for (const PassPhaseId dependency_phase_id : phase.description.explicit_dependencies) {
-      detail::validate_phase_id(dependency_phase_id, phases.size(), "PassPhaseDesc.explicit_dependencies");
-      if (dependency_phase_id >= phase_index) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' dependency on phase id {} must refer to an earlier phase.",
-                                                                               phase.description.name, dependency_phase_id));
-      }
+      detail::validate_phase_dependency(phase.description, dependency_phase_id, phase_index, phases.size());
       detail::append_unique_dependency(&resolved_phases[phase_index].dependencies, dependency_phase_id);
     }
 
+    // Buffer accesses derive ownership transfers and memory hazards against prior buffer users.
     for (const PassBufferAccess &buffer_access : phase.description.buffer_accesses) {
-      if (buffer_access.resource_id == 0U) {
-        throw make_engine_error(
-          EngineErrorCode::kInvalidArgument,
-          fmt::format("Phase '{}' contains PassBufferAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase.description.name));
-      }
-      if (buffer_access.buffer == VK_NULL_HANDLE) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' contains PassBufferAccess with VK_NULL_HANDLE.", phase.description.name));
-      }
-      if (buffer_access.stage_mask == vk::PipelineStageFlags2{}) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with empty stage_mask.",
-                                                                               phase.description.name, buffer_access.resource_id));
-      }
-      if (buffer_access.writes && buffer_access.access_mask == vk::AccessFlags2{}) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' contains writable PassBufferAccess for resource id {} with empty access_mask.", phase.description.name,
-                                            buffer_access.resource_id));
-      }
-      if (buffer_access.size == 0U) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with size=0.",
-                                                                               phase.description.name, buffer_access.resource_id));
-      }
-      if (buffer_access.size != VK_WHOLE_SIZE && buffer_access.offset > (std::numeric_limits<vk::DeviceSize>::max() - buffer_access.size)) {
-        throw make_engine_error(
-          EngineErrorCode::kInvalidArgument,
-          fmt::format("Phase '{}' contains PassBufferAccess for resource id {} with offset+size overflow.", phase.description.name, buffer_access.resource_id));
-      }
-      if (!phase_buffer_resource_ids.insert(buffer_access.resource_id).second) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' declares duplicate PassBufferAccess resource id {} within the same phase.", phase.description.name,
-                                            buffer_access.resource_id));
-      }
-      const auto [resource_kind_it, inserted_kind] = declared_resource_kinds.try_emplace(buffer_access.resource_id, ResourceKind::kBuffer);
-      if (!inserted_kind && resource_kind_it->second != ResourceKind::kBuffer) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
-                                            phase.description.name, buffer_access.resource_id));
+      detail::validate_buffer_access(phase.description, buffer_access);
+      detail::validate_unique_buffer_phase_resource(phase.description, buffer_access.resource_id,
+                                                    phase_buffer_resource_ids.insert(buffer_access.resource_id).second);
+      const auto [resource_kind_it, inserted_kind] =
+        declared_resource_kinds.try_emplace(buffer_access.resource_id, detail::ResourceKind::kBuffer);
+      if (!inserted_kind) {
+        detail::validate_buffer_resource_kind(phase.description, buffer_access.resource_id, resource_kind_it->second);
       }
 
       const auto state_it = buffer_usage_states.find(buffer_access.resource_id);
       if (state_it != buffer_usage_states.end()) {
-        const BufferUsageState &previous_state = state_it->second;
-        if (previous_state.buffer != buffer_access.buffer || previous_state.offset != buffer_access.offset || previous_state.size != buffer_access.size) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Phase '{}' reused buffer resource id {} with a different handle/range. Use separate resource IDs.",
-                                              phase.description.name, buffer_access.resource_id));
-        }
+        const detail::BufferUsageState &previous_state = state_it->second;
+        detail::validate_buffer_state_compatibility(phase.description, buffer_access.resource_id, previous_state, buffer_access);
 
         const bool queue_changed = previous_state.queue_family_index != current_queue_family;
         const bool needs_memory_sync = previous_state.writes || buffer_access.writes;
@@ -767,6 +1229,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         }
 
         if (queue_changed) {
+          // Cross-queue buffer handoff: release on producer queue, acquire on consumer queue.
           resolved_phases[previous_state.phase_index].post_buffer_barriers.push_back(vk::BufferMemoryBarrier2{}
                                                                                        .setSrcStageMask(previous_state.stage_mask)
                                                                                        .setSrcAccessMask(previous_state.access_mask)
@@ -788,6 +1251,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                        .setOffset(buffer_access.offset)
                                                                        .setSize(buffer_access.size));
         } else if (needs_memory_sync) {
+          // Same-queue hazard: a single in-queue memory dependency is sufficient.
           resolved_phases[phase_index].pre_buffer_barriers.push_back(vk::BufferMemoryBarrier2{}
                                                                        .setSrcStageMask(previous_state.stage_mask)
                                                                        .setSrcAccessMask(previous_state.access_mask)
@@ -801,7 +1265,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
         }
       }
 
-      buffer_usage_states[buffer_access.resource_id] = BufferUsageState{
+      buffer_usage_states[buffer_access.resource_id] = detail::BufferUsageState{
         .phase_index = phase_index,
         .queue_family_index = current_queue_family,
         .buffer = buffer_access.buffer,
@@ -813,68 +1277,36 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       };
     }
 
-    for (const PassImageAccess &image_access : phase.description.image_accesses) {
-      const vk::ImageLayout image_access_layout = detail::canonical_pass_image_layout(image_access.layout);
-      if (image_access.resource_id == 0U) {
-        throw make_engine_error(
-          EngineErrorCode::kInvalidArgument,
-          fmt::format("Phase '{}' contains PassImageAccess with resource_id=0. Assign explicit non-zero resource IDs.", phase.description.name));
-      }
-      if (image_access.image == VK_NULL_HANDLE) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' contains PassImageAccess with VK_NULL_HANDLE.", phase.description.name));
-      }
-      if (image_access.stage_mask == vk::PipelineStageFlags2{}) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty stage_mask.",
-                                                                               phase.description.name, image_access.resource_id));
-      }
-      if (image_access.writes && image_access.access_mask == vk::AccessFlags2{}) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' contains writable PassImageAccess for resource id {} with empty access_mask.", phase.description.name,
-                                            image_access.resource_id));
-      }
-      if (image_access_layout == vk::ImageLayout::eUndefined) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with eUndefined layout.",
-                                                                               phase.description.name, image_access.resource_id));
-      }
-      if (image_access.subresource_range.aspectMask == vk::ImageAspectFlags{}) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument, fmt::format("Phase '{}' contains PassImageAccess for resource id {} with empty aspectMask.",
-                                                                               phase.description.name, image_access.resource_id));
-      }
-      if (image_access.subresource_range.levelCount == 0U || image_access.subresource_range.layerCount == 0U) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' contains PassImageAccess for resource id {} with zero levelCount/layerCount.", phase.description.name,
-                                            image_access.resource_id));
-      }
-      if (!phase_image_resource_ids.insert(image_access.resource_id).second) {
-        throw make_engine_error(
-          EngineErrorCode::kInvalidArgument,
-          fmt::format("Phase '{}' declares duplicate PassImageAccess resource id {} within the same phase.", phase.description.name, image_access.resource_id));
-      }
-      const auto [resource_kind_it, inserted_kind] = declared_resource_kinds.try_emplace(image_access.resource_id, ResourceKind::kImage);
-      if (!inserted_kind && resource_kind_it->second != ResourceKind::kImage) {
-        throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                fmt::format("Phase '{}' reuses resource id {} across buffer and image declarations. Resource IDs must keep one kind.",
-                                            phase.description.name, image_access.resource_id));
+    // Image accesses derive queue handoffs and layout/memory hazards against prior image users.
+    for (const PassImageAccess &image_access : phase_image_accesses) {
+      const vk::ImageLayout image_access_layout = detail::image_access_layout_for_phase(phase.description);
+      detail::validate_image_access(phase.description, image_access);
+      detail::validate_unique_image_phase_resource(phase.description, image_access.resource_id,
+                                                   phase_image_resource_ids.insert(image_access.resource_id).second);
+      const auto [resource_kind_it, inserted_kind] = declared_resource_kinds.try_emplace(image_access.resource_id, detail::ResourceKind::kImage);
+      if (!inserted_kind) {
+        detail::validate_image_resource_kind(phase.description, image_access.resource_id, resource_kind_it->second);
       }
 
       const auto state_it = image_usage_states.find(image_access.resource_id);
       if (state_it != image_usage_states.end()) {
-        const ImageUsageState &previous_state = state_it->second;
-        if (previous_state.image != image_access.image || previous_state.subresource_range != image_access.subresource_range) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Phase '{}' reused image resource id {} with a different handle/range. Use separate resource IDs.",
-                                              phase.description.name, image_access.resource_id));
-        }
+        const detail::ImageUsageState &previous_state = state_it->second;
+        detail::validate_image_state_compatibility(phase.description, image_access.resource_id, previous_state, image_access);
 
-        const bool queue_changed = previous_state.queue_family_index != current_queue_family;
+        const bool has_internal_predecessor = previous_state.phase_index != kExternalUsagePhaseIndex;
+        if (!has_internal_predecessor) {
+          detail::validate_external_image_queue_transition(phase.description, image_access.resource_id, previous_state.queue_family_index,
+                                                           current_queue_family);
+        }
+        const bool queue_changed = has_internal_predecessor && previous_state.queue_family_index != current_queue_family;
         const bool layout_changed = detail::layout_transition_required(previous_state.layout, image_access_layout);
         const bool needs_sync = previous_state.writes || image_access.writes || layout_changed;
-        if (queue_changed || needs_sync) {
+        if (has_internal_predecessor && (queue_changed || needs_sync)) {
           detail::append_unique_dependency(&resolved_phases[phase_index].dependencies, previous_state.phase_index);
         }
 
         if (queue_changed) {
+          // Cross-queue image handoff, optionally carrying a required layout transition.
           const vk::ImageLayout transfer_layout = layout_changed ? image_access_layout : previous_state.layout;
           resolved_phases[previous_state.phase_index].post_image_barriers.push_back(vk::ImageMemoryBarrier2{}
                                                                                       .setSrcStageMask(previous_state.stage_mask)
@@ -899,6 +1331,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                       .setImage(image_access.image)
                                                                       .setSubresourceRange(image_access.subresource_range));
         } else if (needs_sync) {
+          // Same-queue image hazard and/or layout transition.
           resolved_phases[phase_index].pre_image_barriers.push_back(vk::ImageMemoryBarrier2{}
                                                                       .setSrcStageMask(previous_state.stage_mask)
                                                                       .setSrcAccessMask(previous_state.access_mask)
@@ -912,7 +1345,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                       .setSubresourceRange(image_access.subresource_range));
         }
       } else {
-        // First usage in this execution: initialize layout from eUndefined.
+        // First observed usage with no tracked state: initialize from undefined.
         resolved_phases[phase_index].pre_image_barriers.push_back(vk::ImageMemoryBarrier2{}
                                                                     .setSrcStageMask(vk::PipelineStageFlagBits2::eNone)
                                                                     .setSrcAccessMask(vk::AccessFlagBits2::eNone)
@@ -926,7 +1359,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
                                                                     .setSubresourceRange(image_access.subresource_range));
       }
 
-      image_usage_states[image_access.resource_id] = ImageUsageState{
+      image_usage_states[image_access.resource_id] = detail::ImageUsageState{
         .phase_index = phase_index,
         .queue_family_index = current_queue_family,
         .image = image_access.image,
@@ -939,30 +1372,34 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     }
   }
 
+  // Persist tracked image states for the next execute() call.
+  for (const auto &[resource_id, image_state] : image_usage_states) {
+    tracked_image_states_[resource_id] = TrackedImageState{
+      .queue_family_index = image_state.queue_family_index,
+      .image = image_state.image,
+      .subresource_range = image_state.subresource_range,
+      .layout = image_state.layout,
+      .stage_mask = image_state.stage_mask,
+      .access_mask = image_state.access_mask,
+      .writes = image_state.writes,
+    };
+  }
+
+  // Canonicalize dependency lists for deterministic submit ordering.
   for (ResolvedPhase &phase : resolved_phases) {
     std::ranges::sort(phase.dependencies);
     phase.dependencies.erase(std::unique(phase.dependencies.begin(), phase.dependencies.end()), phase.dependencies.end());
   }
 
+  // Validate external timeline/binary semaphore wiring before command recording starts.
   for (const PassExternalWait &wait : execution_info.waits) {
-    detail::validate_phase_id(wait.phase_id, phases.size(), "PassExecutionInfo.waits");
-    if (wait.semaphore == VK_NULL_HANDLE) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain VK_NULL_HANDLE semaphore.");
-    }
-    if (wait.stage_mask == vk::PipelineStageFlags2{}) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.waits cannot contain empty stage_mask.");
-    }
+    detail::validate_external_wait(wait, phases.size());
   }
   for (const PassExternalSignal &signal : execution_info.signals) {
-    detail::validate_phase_id(signal.phase_id, phases.size(), "PassExecutionInfo.signals");
-    if (signal.semaphore == VK_NULL_HANDLE) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain VK_NULL_HANDLE semaphore.");
-    }
-    if (signal.stage_mask == vk::PipelineStageFlags2{}) {
-      throw make_engine_error(EngineErrorCode::kInvalidArgument, "PassExecutionInfo.signals cannot contain empty stage_mask.");
-    }
+    detail::validate_external_signal(signal, phases.size());
   }
 
+  // Reset per-queue command pools so this execute() call records a fresh command stream.
   for (QueueRuntime &queue_runtime : queue_runtimes_) {
     queue_runtime.command_pool.reset(vk::CommandPoolResetFlags{});
   }
@@ -971,6 +1408,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
   command_buffers.reserve(phases.size());
   std::vector<vk::CommandBuffer> command_buffer_handles(phases.size(), VK_NULL_HANDLE);
 
+  // Pass 2: record one primary command buffer per phase.
   for (std::size_t phase_index = 0; phase_index < resolved_phases.size(); ++phase_index) {
     const ResolvedPhase &resolved_phase = resolved_phases[phase_index];
     const PassPhase &phase = *resolved_phase.phase;
@@ -985,52 +1423,24 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     const vk::CommandBufferBeginInfo begin_info = vk::CommandBufferBeginInfo{}.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     command_buffer_handles[phase_index].begin(begin_info);
 
+    // Apply pre-phase synchronization before invoking app recording callbacks.
     detail::emit_barriers(command_buffer_handles[phase_index], resolved_phase.pre_buffer_barriers, resolved_phase.pre_image_barriers);
 
     if (phase.description.kind == PassPhaseKind::kGraphics) {
-        const PassGraphicsRenderingInfo &rendering = *phase.description.graphics_rendering;
+      // Graphics phases run inside a dynamic-rendering scope.
+      const PassGraphicsRenderingInfo &rendering = *phase.description.graphics_rendering;
       std::vector<vk::RenderingAttachmentInfo> color_attachments;
       color_attachments.reserve(rendering.color_attachments.size());
       for (const PassColorAttachmentDesc &color_attachment : rendering.color_attachments) {
-        const vk::ImageLayout color_attachment_layout = detail::canonical_pass_image_layout(color_attachment.image_layout);
-        const vk::ImageLayout resolve_image_layout = detail::canonical_pass_image_layout(color_attachment.resolve_image_layout);
-        if (color_attachment.image_view == VK_NULL_HANDLE) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains color attachment with VK_NULL_HANDLE image_view.", phase.description.name));
-        }
-        if (color_attachment_layout == vk::ImageLayout::eUndefined) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains color attachment with eUndefined image_layout.", phase.description.name));
-        }
-        if (color_attachment.load_op == vk::AttachmentLoadOp::eClear && !color_attachment.clear_value.has_value()) {
-          throw make_engine_error(
-            EngineErrorCode::kInvalidArgument,
-            fmt::format("Graphics phase '{}' color attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
-        }
-        if (color_attachment.load_op != vk::AttachmentLoadOp::eClear && color_attachment.clear_value.has_value()) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' color attachment provides clear_value but load_op is not eClear.", phase.description.name));
-        }
-        const bool has_resolve_view = color_attachment.resolve_image_view != VK_NULL_HANDLE;
-        const bool has_resolve_mode = color_attachment.resolve_mode != vk::ResolveModeFlagBits::eNone;
-        if (has_resolve_view != has_resolve_mode) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' color attachment resolve_image_view/resolve_mode must either both be set or both be unset.",
-                                              phase.description.name));
-        }
-        if (has_resolve_view && resolve_image_layout == vk::ImageLayout::eUndefined) {
-          throw make_engine_error(
-            EngineErrorCode::kInvalidArgument,
-            fmt::format("Graphics phase '{}' color attachment resolve target uses eUndefined resolve_image_layout.", phase.description.name));
-        }
+        detail::validate_color_attachment(phase.description, color_attachment);
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(color_attachment.image_view)
-                                                        .setImageLayout(color_attachment_layout)
+                                                        .setImageLayout(vk::ImageLayout::eGeneral)
                                                         .setLoadOp(color_attachment.load_op)
                                                         .setStoreOp(color_attachment.store_op)
                                                         .setResolveMode(color_attachment.resolve_mode)
                                                         .setResolveImageView(color_attachment.resolve_image_view)
-                                                        .setResolveImageLayout(resolve_image_layout);
+                                                        .setResolveImageLayout(vk::ImageLayout::eGeneral);
         if (color_attachment.clear_value.has_value()) {
           attachment_info = attachment_info.setClearValue(*color_attachment.clear_value);
         }
@@ -1040,27 +1450,10 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       std::optional<vk::RenderingAttachmentInfo> depth_attachment_info;
       if (rendering.depth_attachment.has_value()) {
         const PassDepthAttachmentDesc &depth_attachment = *rendering.depth_attachment;
-        const vk::ImageLayout depth_attachment_layout = detail::canonical_pass_image_layout(depth_attachment.image_layout);
-        if (depth_attachment.image_view == VK_NULL_HANDLE) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains depth attachment with VK_NULL_HANDLE image_view.", phase.description.name));
-        }
-        if (depth_attachment_layout == vk::ImageLayout::eUndefined) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains depth attachment with eUndefined image_layout.", phase.description.name));
-        }
-        if (depth_attachment.load_op == vk::AttachmentLoadOp::eClear && !depth_attachment.clear_value.has_value()) {
-          throw make_engine_error(
-            EngineErrorCode::kInvalidArgument,
-            fmt::format("Graphics phase '{}' depth attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
-        }
-        if (depth_attachment.load_op != vk::AttachmentLoadOp::eClear && depth_attachment.clear_value.has_value()) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' depth attachment provides clear_value but load_op is not eClear.", phase.description.name));
-        }
+        detail::validate_depth_stencil_attachment(phase.description, depth_attachment, "depth");
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(depth_attachment.image_view)
-                                                        .setImageLayout(depth_attachment_layout)
+                                                        .setImageLayout(vk::ImageLayout::eGeneral)
                                                         .setLoadOp(depth_attachment.load_op)
                                                         .setStoreOp(depth_attachment.store_op);
         if (depth_attachment.clear_value.has_value()) {
@@ -1072,28 +1465,10 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       std::optional<vk::RenderingAttachmentInfo> stencil_attachment_info;
       if (rendering.stencil_attachment.has_value()) {
         const PassDepthAttachmentDesc &stencil_attachment = *rendering.stencil_attachment;
-        const vk::ImageLayout stencil_attachment_layout = detail::canonical_pass_image_layout(stencil_attachment.image_layout);
-        if (stencil_attachment.image_view == VK_NULL_HANDLE) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains stencil attachment with VK_NULL_HANDLE image_view.", phase.description.name));
-        }
-        if (stencil_attachment_layout == vk::ImageLayout::eUndefined) {
-          throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                                  fmt::format("Graphics phase '{}' contains stencil attachment with eUndefined image_layout.", phase.description.name));
-        }
-        if (stencil_attachment.load_op == vk::AttachmentLoadOp::eClear && !stencil_attachment.clear_value.has_value()) {
-          throw make_engine_error(
-            EngineErrorCode::kInvalidArgument,
-            fmt::format("Graphics phase '{}' stencil attachment uses load_op=eClear but does not provide clear_value.", phase.description.name));
-        }
-        if (stencil_attachment.load_op != vk::AttachmentLoadOp::eClear && stencil_attachment.clear_value.has_value()) {
-          throw make_engine_error(
-            EngineErrorCode::kInvalidArgument,
-            fmt::format("Graphics phase '{}' stencil attachment provides clear_value but load_op is not eClear.", phase.description.name));
-        }
+        detail::validate_depth_stencil_attachment(phase.description, stencil_attachment, "stencil");
         vk::RenderingAttachmentInfo attachment_info = vk::RenderingAttachmentInfo{}
                                                         .setImageView(stencil_attachment.image_view)
-                                                        .setImageLayout(stencil_attachment_layout)
+                                                        .setImageLayout(vk::ImageLayout::eGeneral)
                                                         .setLoadOp(stencil_attachment.load_op)
                                                         .setStoreOp(stencil_attachment.store_op);
         if (stencil_attachment.clear_value.has_value()) {
@@ -1119,14 +1494,17 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       phase.record(encoder);
       command_buffer_handles[phase_index].endRendering();
     } else {
+      // Compute/transfer phases record directly with no dynamic-rendering scope.
       PassCommandEncoder encoder{command_buffer_handles[phase_index], phase.description.kind, command_dispatch_};
       phase.record(encoder);
     }
 
+    // Emit producer-side release barriers after phase recording completes.
     detail::emit_barriers(command_buffer_handles[phase_index], resolved_phase.post_buffer_barriers, resolved_phase.post_image_barriers);
     command_buffer_handles[phase_index].end();
   }
 
+  // Bucket external waits/signals by phase so submit assembly is O(phase-local wiring).
   std::vector<std::vector<PassExternalWait>> waits_by_phase(phases.size());
   for (const PassExternalWait &wait : execution_info.waits) {
     waits_by_phase[wait.phase_id].push_back(wait);
@@ -1136,6 +1514,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     signals_by_phase[signal.phase_id].push_back(signal);
   }
 
+  // Pass 3: submit phases with timeline-based cross-queue dependency chaining.
   std::vector<std::uint64_t> phase_timeline_values(phases.size(), 0U);
   std::uint64_t timeline_value_cursor = completed_timeline_value_;
   for (std::size_t phase_index = 0; phase_index < resolved_phases.size(); ++phase_index) {
@@ -1144,6 +1523,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
 
     std::vector<vk::SemaphoreSubmitInfo> wait_infos;
     wait_infos.reserve(phase.dependencies.size() + waits_by_phase[phase_index].size());
+    // Only cross-queue dependencies need semaphore waits; same-queue order is implicit.
     for (const std::size_t dependency_index : phase.dependencies) {
       const bool cross_queue = resolved_phases[dependency_index].queue_runtime_index != phase.queue_runtime_index;
       if (!cross_queue) {
@@ -1158,6 +1538,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
       wait_infos.push_back(vk::SemaphoreSubmitInfo{}.setSemaphore(wait.semaphore).setValue(wait.value).setStageMask(wait.stage_mask));
     }
 
+    // Each phase signals the internal timeline plus any user-requested semaphores.
     std::vector<vk::SemaphoreSubmitInfo> signal_infos;
     signal_infos.reserve(1U + signals_by_phase[phase_index].size());
     phase_timeline_values[phase_index] = ++timeline_value_cursor;
@@ -1175,6 +1556,7 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     queue_runtime.queue.submit2(submit_info, vk::Fence{});
   }
 
+  // Wait for the final timeline point so execute() returns only after all phase work completes.
   const vk::SemaphoreWaitInfo wait_info = vk::SemaphoreWaitInfo{}.setSemaphores(*timeline_semaphore_).setValues(timeline_value_cursor);
   const vk::Result wait_result = device_->waitSemaphores(wait_info, std::numeric_limits<std::uint64_t>::max());
   if (wait_result != vk::Result::eSuccess) {
@@ -1188,5 +1570,21 @@ void PassExecutor::wait_idle() const {
     device_->waitIdle();
   }
 }
+
+void PassExecutor::prime_tracked_image_state(const PassResourceId resource_id, const vk::Image image, const vk::ImageSubresourceRange subresource_range,
+                                             const vk::ImageLayout layout, const vk::PipelineStageFlags2 stage_mask, const vk::AccessFlags2 access_mask,
+                                             const bool writes, const std::uint32_t queue_family_index) {
+  tracked_image_states_[resource_id] = TrackedImageState{
+    .queue_family_index = queue_family_index,
+    .image = image,
+    .subresource_range = subresource_range,
+    .layout = detail::canonical_pass_image_layout(layout),
+    .stage_mask = stage_mask,
+    .access_mask = access_mask,
+    .writes = writes,
+  };
+}
+
+void PassExecutor::reset_tracked_image_states() { tracked_image_states_.clear(); }
 
 } // namespace varre::engine
