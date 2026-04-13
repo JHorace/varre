@@ -218,6 +218,8 @@ struct PassShaderBinding {
 struct PassCommandDispatch {
   /** @brief `vkCmdBindShadersEXT` function pointer. */
   PFN_vkCmdBindShadersEXT cmd_bind_shaders_ext = nullptr;
+  /** @brief `vkCmdSetVertexInputEXT` function pointer. */
+  PFN_vkCmdSetVertexInputEXT cmd_set_vertex_input_ext = nullptr;
   /** @brief `vkCmdSetPolygonModeEXT` function pointer. */
   PFN_vkCmdSetPolygonModeEXT cmd_set_polygon_mode_ext = nullptr;
   /** @brief `vkCmdSetLogicOpEnableEXT` function pointer. */
@@ -292,6 +294,14 @@ public:
    * @param scissors Scissor list.
    */
   void set_scissors(std::span<const vk::Rect2D> scissors) const;
+
+  /**
+   * @brief Set dynamic vertex input bindings/attributes.
+   * @param bindings Vertex binding descriptions.
+   * @param attributes Vertex attribute descriptions.
+   */
+  void set_vertex_input(std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+                        std::span<const vk::VertexInputAttributeDescription2EXT> attributes) const;
 
   /**
    * @brief Set dynamic primitive topology.

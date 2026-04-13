@@ -733,6 +733,18 @@ void PassCommandEncoder::set_scissors(const std::span<const vk::Rect2D> scissors
   command_buffer_.setScissorWithCount(scissors);
 }
 
+void PassCommandEncoder::set_vertex_input(const std::span<const vk::VertexInputBindingDescription2EXT> bindings,
+                                          const std::span<const vk::VertexInputAttributeDescription2EXT> attributes) const {
+  require_phase_kind(PassPhaseKind::kGraphics, "set_vertex_input");
+  if (command_dispatch_.cmd_set_vertex_input_ext == nullptr) {
+    throw make_engine_error(EngineErrorCode::kInvalidState, "PassCommandEncoder cannot set vertex input because vkCmdSetVertexInputEXT is unavailable.");
+  }
+  command_dispatch_.cmd_set_vertex_input_ext(static_cast<VkCommandBuffer>(command_buffer_), static_cast<std::uint32_t>(bindings.size()),
+                                             reinterpret_cast<const VkVertexInputBindingDescription2EXT *>(bindings.data()),
+                                             static_cast<std::uint32_t>(attributes.size()),
+                                             reinterpret_cast<const VkVertexInputAttributeDescription2EXT *>(attributes.data()));
+}
+
 void PassCommandEncoder::set_primitive_topology(const vk::PrimitiveTopology topology) const {
   require_phase_kind(PassPhaseKind::kGraphics, "set_primitive_topology");
   command_buffer_.setPrimitiveTopology(topology);
@@ -1026,6 +1038,7 @@ PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecuto
   const auto load_device_proc = [&](const char *name) -> PFN_vkVoidFunction { return vkGetDeviceProcAddr(static_cast<VkDevice>(*engine.device()), name); };
   const PassCommandDispatch command_dispatch{
     .cmd_bind_shaders_ext = reinterpret_cast<PFN_vkCmdBindShadersEXT>(load_device_proc("vkCmdBindShadersEXT")),
+    .cmd_set_vertex_input_ext = reinterpret_cast<PFN_vkCmdSetVertexInputEXT>(load_device_proc("vkCmdSetVertexInputEXT")),
     .cmd_set_polygon_mode_ext = reinterpret_cast<PFN_vkCmdSetPolygonModeEXT>(load_device_proc("vkCmdSetPolygonModeEXT")),
     .cmd_set_logic_op_enable_ext = reinterpret_cast<PFN_vkCmdSetLogicOpEnableEXT>(load_device_proc("vkCmdSetLogicOpEnableEXT")),
     .cmd_set_color_blend_enable_ext = reinterpret_cast<PFN_vkCmdSetColorBlendEnableEXT>(load_device_proc("vkCmdSetColorBlendEnableEXT")),
@@ -1036,7 +1049,8 @@ PassExecutor PassExecutor::create(const EngineContext &engine, const PassExecuto
     .cmd_set_alpha_to_coverage_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToCoverageEnableEXT>(load_device_proc("vkCmdSetAlphaToCoverageEnableEXT")),
     .cmd_set_alpha_to_one_enable_ext = reinterpret_cast<PFN_vkCmdSetAlphaToOneEnableEXT>(load_device_proc("vkCmdSetAlphaToOneEnableEXT")),
   };
-  if (command_dispatch.cmd_bind_shaders_ext == nullptr || command_dispatch.cmd_set_polygon_mode_ext == nullptr ||
+  if (command_dispatch.cmd_bind_shaders_ext == nullptr || command_dispatch.cmd_set_vertex_input_ext == nullptr ||
+      command_dispatch.cmd_set_polygon_mode_ext == nullptr ||
       command_dispatch.cmd_set_logic_op_enable_ext == nullptr ||
       command_dispatch.cmd_set_color_blend_enable_ext == nullptr || command_dispatch.cmd_set_color_blend_equation_ext == nullptr ||
       command_dispatch.cmd_set_color_write_mask_ext == nullptr || command_dispatch.cmd_set_rasterization_samples_ext == nullptr ||
