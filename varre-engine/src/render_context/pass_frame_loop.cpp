@@ -182,21 +182,6 @@ PassFrameRunResult PassFrameLoop::run_frame(SwapchainContext *swapchain, const P
       .signal_render_finished = true,
     });
   } else {
-    pass_executor_.prime_tracked_image_state(
-      frame_context.swapchain_resource_id,
-      frame_context.image,
-      vk::ImageSubresourceRange{}
-        .setAspectMask(vk::ImageAspectFlagBits::eColor)
-        .setBaseMipLevel(0U)
-        .setLevelCount(1U)
-        .setBaseArrayLayer(0U)
-        .setLayerCount(1U),
-      vk::ImageLayout::eGeneral,
-      vk::PipelineStageFlagBits2::eAllCommands,
-      vk::AccessFlagBits2::eMemoryWrite,
-      true,
-      VK_QUEUE_FAMILY_IGNORED);
-
     const FrameSyncPrimitives &sync = frame_loop_.current_sync();
     PassExecutionInfo execution_info{
       .waits =
