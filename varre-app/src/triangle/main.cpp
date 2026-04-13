@@ -19,8 +19,6 @@
 
 namespace {
 
-constexpr varre::engine::PassResourceId kSwapchainImageResourceId = 1U;
-
 [[nodiscard]] vk::ImageSubresourceRange swapchain_color_subresource_range() {
   return vk::ImageSubresourceRange{}
     .setAspectMask(vk::ImageAspectFlagBits::eColor)
@@ -49,46 +47,12 @@ void build_triangle_frame_graph(const varre::engine::PassFrameContext &frame_con
 
   static_cast<void>(graph->add_phase(
     varre::engine::PassPhaseDesc{
-      .name = "swapchain_present_to_pass",
-      .kind = varre::engine::PassPhaseKind::kTransfer,
-      .queue = varre::engine::PassQueueKind::kGraphics,
-      .explicit_dependencies = {},
-      .buffer_accesses = {},
-      .image_accesses =
-        {
-          varre::engine::PassImageAccess{
-            .resource_id = kSwapchainImageResourceId,
-            .image = frame_context.image,
-            .subresource_range = subresource_range,
-            .layout = vk::ImageLayout::ePresentSrcKHR,
-            .stage_mask = vk::PipelineStageFlagBits2::eAllCommands,
-            .access_mask = vk::AccessFlagBits2::eMemoryRead,
-            .writes = false,
-          },
-        },
-      .graphics_rendering = std::nullopt,
-    },
-    [](varre::engine::PassCommandEncoder & /*encoder*/) {}));
-
-  static_cast<void>(graph->add_phase(
-    varre::engine::PassPhaseDesc{
-      .name = "triangle_color_clear",
+      .name = "triangle_clear_pass",
       .kind = varre::engine::PassPhaseKind::kGraphics,
       .queue = varre::engine::PassQueueKind::kGraphics,
       .explicit_dependencies = {},
       .buffer_accesses = {},
-      .image_accesses =
-        {
-          varre::engine::PassImageAccess{
-            .resource_id = kSwapchainImageResourceId,
-            .image = frame_context.image,
-            .subresource_range = subresource_range,
-            .layout = vk::ImageLayout::eColorAttachmentOptimal,
-            .stage_mask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-            .access_mask = vk::AccessFlagBits2::eColorAttachmentWrite,
-            .writes = true,
-          },
-        },
+      .image_accesses = {},
       .graphics_rendering =
         varre::engine::PassGraphicsRenderingInfo{
           .render_area = vk::Rect2D{vk::Offset2D{0, 0}, frame_context.extent},
@@ -97,8 +61,10 @@ void build_triangle_frame_graph(const varre::engine::PassFrameContext &frame_con
           .color_attachments =
             {
               varre::engine::PassColorAttachmentDesc{
+                .resource_id = frame_context.swapchain_resource_id,
+                .image = frame_context.image,
+                .subresource_range = subresource_range,
                 .image_view = frame_context.image_view,
-                .image_layout = vk::ImageLayout::eColorAttachmentOptimal,
                 .load_op = vk::AttachmentLoadOp::eClear,
                 .store_op = vk::AttachmentStoreOp::eStore,
                 .clear_value = animated_clear_color(t_seconds),
@@ -111,29 +77,6 @@ void build_triangle_frame_graph(const varre::engine::PassFrameContext &frame_con
     [](varre::engine::PassCommandEncoder & /*encoder*/) {
       // Triangle draw submission is intentionally deferred to a later app step.
     }));
-
-  static_cast<void>(graph->add_phase(
-    varre::engine::PassPhaseDesc{
-      .name = "swapchain_pass_to_present",
-      .kind = varre::engine::PassPhaseKind::kTransfer,
-      .queue = varre::engine::PassQueueKind::kGraphics,
-      .explicit_dependencies = {},
-      .buffer_accesses = {},
-      .image_accesses =
-        {
-          varre::engine::PassImageAccess{
-            .resource_id = kSwapchainImageResourceId,
-            .image = frame_context.image,
-            .subresource_range = subresource_range,
-            .layout = vk::ImageLayout::ePresentSrcKHR,
-            .stage_mask = vk::PipelineStageFlagBits2::eAllCommands,
-            .access_mask = vk::AccessFlagBits2::eMemoryRead,
-            .writes = false,
-          },
-        },
-      .graphics_rendering = std::nullopt,
-    },
-    [](varre::engine::PassCommandEncoder & /*encoder*/) {}));
 }
 
 } // namespace
