@@ -372,8 +372,14 @@ TEST_CASE("shader and model services integrate with generated asset lookup", "[e
   REQUIRE(shader_count > 0U);
 
   varre::engine::ShaderObjectCache shader_cache = varre::engine::ShaderObjectCache::create(engine);
+  const std::array<varre::engine::ShaderObjectCreateEntryById, 1> shader_request_entries{
+    varre::engine::ShaderObjectCreateEntryById{
+      .shader_id = shader_ids[0],
+      .next_stage = {},
+    },
+  };
   const varre::engine::ShaderObjectSet shader_set = shader_cache.get_or_create(varre::engine::ShaderObjectCreateRequestById{
-    .shader_ids = std::span<const varre::assets::ShaderId>{shader_ids, 1U},
+    .shaders = shader_request_entries,
     .push_constant_ranges = {},
     .shader_create_flags = {},
   });

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <ranges>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -62,36 +63,24 @@ void validate_unique_shader_view_stages(const std::span<const varre::assets::Sha
 }
 
 /**
- * @brief Default permissive next-stage mask for shader-object creation.
+ * @brief Validate app-provided next-stage masks against one request's stage set.
+ * @param shader_name Diagnostic shader name.
  * @param stage Shader stage being created.
- * @return Stage mask suitable for `VkShaderCreateInfoEXT::nextStage`.
+ * @param next_stage App-provided `nextStage` mask.
+ * @param present_stages Stage set present in the request.
  */
-[[nodiscard]] vk::ShaderStageFlags default_next_stage_mask(const vk::ShaderStageFlagBits stage) {
-  switch (stage) {
-  case vk::ShaderStageFlagBits::eVertex:
-    return vk::ShaderStageFlagBits::eTessellationControl | vk::ShaderStageFlagBits::eTessellationEvaluation | vk::ShaderStageFlagBits::eGeometry |
-           vk::ShaderStageFlagBits::eFragment;
-  case vk::ShaderStageFlagBits::eTessellationControl:
-    return vk::ShaderStageFlagBits::eTessellationEvaluation;
-  case vk::ShaderStageFlagBits::eTessellationEvaluation:
-    return vk::ShaderStageFlagBits::eGeometry | vk::ShaderStageFlagBits::eFragment;
-  case vk::ShaderStageFlagBits::eGeometry:
-    return vk::ShaderStageFlagBits::eFragment;
-  case vk::ShaderStageFlagBits::eTaskEXT:
-    return vk::ShaderStageFlagBits::eMeshEXT | vk::ShaderStageFlagBits::eFragment;
-  case vk::ShaderStageFlagBits::eMeshEXT:
-    return vk::ShaderStageFlagBits::eFragment;
-  case vk::ShaderStageFlagBits::eFragment:
-  case vk::ShaderStageFlagBits::eCompute:
-  case vk::ShaderStageFlagBits::eRaygenKHR:
-  case vk::ShaderStageFlagBits::eAnyHitKHR:
-  case vk::ShaderStageFlagBits::eClosestHitKHR:
-  case vk::ShaderStageFlagBits::eMissKHR:
-  case vk::ShaderStageFlagBits::eIntersectionKHR:
-  case vk::ShaderStageFlagBits::eCallableKHR:
-    return vk::ShaderStageFlags{};
-  default:
-    return vk::ShaderStageFlags{};
+void validate_next_stage_mask(const std::string_view shader_name, const vk::ShaderStageFlagBits stage, const vk::ShaderStageFlags next_stage,
+                              const vk::ShaderStageFlags present_stages) {
+  if (next_stage == vk::ShaderStageFlags{}) {
+    return;
+  }
+
+  const vk::ShaderStageFlags stages_without_self = present_stages & ~vk::ShaderStageFlags{stage};
+  const vk::ShaderStageFlags invalid_bits = next_stage & ~stages_without_self;
+  if (invalid_bits != vk::ShaderStageFlags{}) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument,
+                            fmt::format("Shader '{}' provides next_stage={} that references stage bits not present in the request (or itself).",
+                                        shader_name, vk::to_string(next_stage)));
   }
 }
 } // namespace detail
@@ -134,7 +123,7 @@ ShaderObjectCache ShaderObjectCache::create(const EngineContext &engine) {
 
 vk::ShaderEXT ShaderObjectCache::get_or_create_shader_object(const varre::assets::ShaderAssetView &shader, const MaterialDescriptorLayout &descriptor_layout,
                                                              const std::span<const vk::PushConstantRange> push_constant_ranges,
-                                                             const vk::ShaderCreateFlagsEXT create_flags) {
+                                                             const vk::ShaderCreateFlagsEXT create_flags, const vk::ShaderStageFlags next_stage) {
   if (device_ == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "ShaderObjectCache is not initialized.");
   }
@@ -145,6 +134,7 @@ vk::ShaderEXT ShaderObjectCache::get_or_create_shader_object(const varre::assets
     .shader_id = shader.id,
     .pipeline_layout_handle = detail::pipeline_layout_handle_token(descriptor_layout.pipeline_layout),
     .create_flags = static_cast<std::uint32_t>(create_flags),
+    .next_stage_mask = static_cast<std::uint32_t>(next_stage),
   };
 
   for (std::size_t index = 0; index < keys_.size(); ++index) {
@@ -156,7 +146,7 @@ vk::ShaderEXT ShaderObjectCache::get_or_create_shader_object(const varre::assets
   const vk::ShaderCreateInfoEXT create_info = vk::ShaderCreateInfoEXT{}
                                                 .setFlags(create_flags)
                                                 .setStage(stage)
-                                                .setNextStage(detail::default_next_stage_mask(stage))
+                                                .setNextStage(next_stage)
                                                 .setCodeType(vk::ShaderCodeTypeEXT::eSpirv)
                                                 .setCodeSize(shader.size)
                                                 .setPCode(static_cast<const void *>(shader.data))
@@ -172,23 +162,32 @@ ShaderObjectSet ShaderObjectCache::get_or_create(const ShaderObjectCreateRequest
   if (device_ == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "ShaderObjectCache is not initialized.");
   }
-  if (request.shader_ids.empty()) {
-    throw make_engine_error(EngineErrorCode::kInvalidArgument, "ShaderObjectCreateRequestById::shader_ids must not be empty.");
+  if (request.shaders.empty()) {
+    throw make_engine_error(EngineErrorCode::kInvalidArgument, "ShaderObjectCreateRequestById::shaders must not be empty.");
   }
 
   std::vector<varre::assets::ShaderAssetView> shaders;
-  shaders.reserve(request.shader_ids.size());
-  for (const varre::assets::ShaderId shader_id : request.shader_ids) {
-    const varre::assets::ShaderAssetView *shader = varre::assets::get_shader(shader_id);
+  shaders.reserve(request.shaders.size());
+  std::vector<vk::ShaderStageFlags> next_stages;
+  next_stages.reserve(request.shaders.size());
+  vk::ShaderStageFlags present_stages{};
+  for (const ShaderObjectCreateEntryById &entry : request.shaders) {
+    const varre::assets::ShaderAssetView *shader = varre::assets::get_shader(entry.shader_id);
     if (shader == nullptr) {
       throw make_engine_error(EngineErrorCode::kInvalidArgument,
-                              fmt::format("Shader asset lookup failed for ShaderId value {}.", static_cast<std::uint32_t>(shader_id)));
+                              fmt::format("Shader asset lookup failed for ShaderId value {}.", static_cast<std::uint32_t>(entry.shader_id)));
     }
     detail::validate_shader_asset_view(*shader);
-    static_cast<void>(to_vk_shader_stage(shader->stage));
+    const vk::ShaderStageFlagBits stage = to_vk_shader_stage(shader->stage);
+    present_stages |= stage;
     shaders.push_back(*shader);
+    next_stages.push_back(entry.next_stage);
   }
   detail::validate_unique_shader_view_stages(shaders);
+
+  for (std::size_t index = 0; index < shaders.size(); ++index) {
+    detail::validate_next_stage_mask(varre::assets::shader_name(shaders[index].id), to_vk_shader_stage(shaders[index].stage), next_stages[index], present_stages);
+  }
 
   const MaterialDescriptorLayout descriptor_layout = descriptor_layout_resolver_.get_or_create(MaterialDescriptorRequest{
     .shaders = shaders,
@@ -199,8 +198,11 @@ ShaderObjectSet ShaderObjectCache::get_or_create(const ShaderObjectCreateRequest
 
   std::vector<ShaderObjectBinding> bindings;
   bindings.reserve(shaders.size());
-  for (const varre::assets::ShaderAssetView &shader : shaders) {
-    const vk::ShaderEXT shader_object = get_or_create_shader_object(shader, descriptor_layout, request.push_constant_ranges, request.shader_create_flags);
+  for (std::size_t index = 0; index < shaders.size(); ++index) {
+    const varre::assets::ShaderAssetView &shader = shaders[index];
+    const vk::ShaderStageFlags next_stage = next_stages[index];
+    const vk::ShaderEXT shader_object =
+      get_or_create_shader_object(shader, descriptor_layout, request.push_constant_ranges, request.shader_create_flags, next_stage);
     bindings.push_back(ShaderObjectBinding{
       .shader_id = shader.id,
       .stage = to_vk_shader_stage(shader.stage),

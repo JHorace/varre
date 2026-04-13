@@ -27,11 +27,25 @@ class EngineContext;
 [[nodiscard]] vk::ShaderStageFlagBits to_vk_shader_stage(varre::assets::ShaderStage stage);
 
 /**
- * @brief Shader-object creation request using generated shader identifiers.
+ * @brief One app-provided shader-linkage entry for shader-object creation.
+ */
+struct ShaderObjectCreateEntryById {
+  /** @brief Shader ID resolved through `varre::assets::get_shader`. */
+  varre::assets::ShaderId shader_id = static_cast<varre::assets::ShaderId>(0U);
+  /**
+   * @brief Explicit next-stage mask for `VkShaderCreateInfoEXT::nextStage`.
+   *
+   * Use an empty mask for terminal stages.
+   */
+  vk::ShaderStageFlags next_stage{};
+};
+
+/**
+ * @brief Shader-object creation request using app-provided linkage entries.
  */
 struct ShaderObjectCreateRequestById {
-  /** @brief Shader IDs resolved through `varre::assets::get_shader`. */
-  std::span<const varre::assets::ShaderId> shader_ids;
+  /** @brief Shader entries including explicit linkage masks. */
+  std::span<const ShaderObjectCreateEntryById> shaders;
   /** @brief Push-constant ranges used for shader-object interface compatibility. */
   std::vector<vk::PushConstantRange> push_constant_ranges;
   /** @brief Vulkan shader-object create flags applied to each shader in the request. */
@@ -116,6 +130,7 @@ private:
     varre::assets::ShaderId shader_id = static_cast<varre::assets::ShaderId>(0U);
     std::uint64_t pipeline_layout_handle = 0U;
     std::uint32_t create_flags = 0U;
+    std::uint32_t next_stage_mask = 0U;
 
     [[nodiscard]] bool operator==(const Key &) const = default;
   };
@@ -131,10 +146,12 @@ private:
    * @param descriptor_layout Descriptor interface for this shader set.
    * @param push_constant_ranges Push-constant ranges for shader-object creation.
    * @param create_flags Vulkan shader-create flags.
+   * @param next_stage App-provided stage mask for shader linkage.
    * @return Shader-object handle.
    */
   [[nodiscard]] vk::ShaderEXT get_or_create_shader_object(const varre::assets::ShaderAssetView &shader, const MaterialDescriptorLayout &descriptor_layout,
-                                                          std::span<const vk::PushConstantRange> push_constant_ranges, vk::ShaderCreateFlagsEXT create_flags);
+                                                          std::span<const vk::PushConstantRange> push_constant_ranges, vk::ShaderCreateFlagsEXT create_flags,
+                                                          vk::ShaderStageFlags next_stage);
 
   const vk::raii::Device *device_ = nullptr;
   MaterialDescriptorLayoutResolver descriptor_layout_resolver_;
@@ -177,8 +194,8 @@ using ::varre::engine::bind_shader_set;
 using ::varre::engine::make_pass_shader_bindings;
 using ::varre::engine::ShaderObjectBinding;
 using ::varre::engine::ShaderObjectCache;
+using ::varre::engine::ShaderObjectCreateEntryById;
 using ::varre::engine::ShaderObjectCreateRequestById;
 using ::varre::engine::ShaderObjectSet;
 using ::varre::engine::to_vk_shader_stage;
 } // namespace varre::engine::asset
-
