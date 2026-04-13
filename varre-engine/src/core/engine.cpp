@@ -86,6 +86,7 @@ EngineContext EngineContext::create(const EngineInitInfo &info) {
 
   std::optional<vk::PhysicalDeviceFeatures2> device_features2;
   std::optional<vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR> unified_image_layouts_features;
+  std::optional<vk::PhysicalDeviceVulkan11Features> vulkan_11_features;
   std::optional<vk::PhysicalDeviceVulkan12Features> vulkan_12_features;
   std::optional<vk::PhysicalDeviceVulkan13Features> vulkan_13_features;
   std::optional<vk::PhysicalDeviceShaderObjectFeaturesEXT> shader_object_features;
@@ -94,7 +95,8 @@ EngineContext EngineContext::create(const EngineInitInfo &info) {
   vulkan_13_features =
     vk::PhysicalDeviceVulkan13Features{}.setPNext(&(*shader_object_features)).setDynamicRendering(VK_TRUE).setSynchronization2(VK_TRUE);
   vulkan_12_features = vk::PhysicalDeviceVulkan12Features{}.setPNext(&(*vulkan_13_features)).setTimelineSemaphore(VK_TRUE);
-  device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_12_features));
+  vulkan_11_features = vk::PhysicalDeviceVulkan11Features{}.setPNext(&(*vulkan_12_features)).setShaderDrawParameters(VK_TRUE);
+  device_features2 = vk::PhysicalDeviceFeatures2{}.setPNext(&(*vulkan_11_features));
   device_create_info = device_create_info.setPNext(&(*device_features2));
 
   vk::raii::Device device(physical_device, device_create_info);

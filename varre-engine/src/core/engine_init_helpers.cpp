@@ -27,14 +27,19 @@ namespace {
   missing_features->clear();
 
   const auto feature_chain =
-    physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features,
-                                 vk::PhysicalDeviceShaderObjectFeaturesEXT, vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR>();
+    physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan12Features,
+                                 vk::PhysicalDeviceVulkan13Features, vk::PhysicalDeviceShaderObjectFeaturesEXT,
+                                 vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR>();
+  const vk::PhysicalDeviceVulkan11Features &vulkan_11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
   const vk::PhysicalDeviceVulkan12Features &vulkan_12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
   const vk::PhysicalDeviceVulkan13Features &vulkan_13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
   const vk::PhysicalDeviceShaderObjectFeaturesEXT &shader_object_features = feature_chain.get<vk::PhysicalDeviceShaderObjectFeaturesEXT>();
   const vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR &unified_image_layouts_features =
     feature_chain.get<vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR>();
 
+  if (!vulkan_11_features.shaderDrawParameters) {
+    missing_features->push_back("shaderDrawParameters");
+  }
   if (!vulkan_12_features.timelineSemaphore) {
     missing_features->push_back("timelineSemaphore");
   }
