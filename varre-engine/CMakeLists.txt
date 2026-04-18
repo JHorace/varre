@@ -111,6 +111,21 @@ if(TARGET Vulkan::Headers)
   target_link_libraries(varre_engine_dependencies INTERFACE Vulkan::Headers)
 endif()
 
+if(UNIX AND NOT APPLE)
+  # Enable Linux-specific surface support.
+  # This allows use of Wayland, XCB, and X11 Vulkan types and extensions.
+  target_compile_definitions(varre_engine_dependencies INTERFACE
+    VK_USE_PLATFORM_WAYLAND_KHR
+    VK_USE_PLATFORM_XCB_KHR
+    VK_USE_PLATFORM_XLIB_KHR
+  )
+endif()
+
+if(WIN32)
+  # Enable Win32 surface support on Windows.
+  target_compile_definitions(varre_engine_dependencies INTERFACE VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
 if(BUILD_TESTING)
   find_package(Catch2 3 CONFIG QUIET)
   if(NOT Catch2_FOUND)
