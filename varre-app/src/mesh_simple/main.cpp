@@ -12,6 +12,7 @@
 #include <span>
 #include <stdexcept>
 #include <vector>
+#include <optional>
 
 #include <SDL3/SDL.h>
 
@@ -20,6 +21,7 @@
 #include "varre/assets/shaders.hpp"
 #include "varre/engine/assets/models.hpp"
 #include "varre/engine/assets/shader_objects.hpp"
+#include "varre/engine/assets/textures.hpp"
 #include "varre/engine/errors.hpp"
 #include "varre/engine/pass_frame_loop.hpp"
 #include "varre/engine/pass_mode.hpp"
@@ -28,6 +30,24 @@ namespace {
 
 constexpr varre::engine::PassResourceId kMeshVertexResourceId = 100U;
 constexpr varre::engine::PassResourceId kMeshIndexResourceId = 101U;
+constexpr varre::engine::PassResourceId kMeshDepthResourceId = 102U;
+
+struct GpuDepthBuffer {
+  varre::engine::GpuImage image;
+  vk::raii::ImageView view = nullptr;
+
+  static GpuDepthBuffer create(const varre::engine::EngineContext &engine, const varre::engine::TextureUploadService &texture_service,
+                               const std::uint32_t width, const std::uint32_t height) {
+    varre::engine::GpuImage depth_image =
+      texture_service.create_device_local_image(width, height, vk::Format::eD32Sfloat, vk::ImageUsageFlagBits::eDepthStencilAttachment);
+
+    vk::raii::ImageView view = texture_service.create_image_view(depth_image.image(), vk::Format::eD32Sfloat, vk::ImageAspectFlagBits::eDepth);
+    return GpuDepthBuffer{
+      .image = std::move(depth_image),
+      .view = std::move(view),
+    };
+  }
+};
 
 [[nodiscard]] vk::ImageSubresourceRange swapchain_color_subresource_range() {
   return vk::ImageSubresourceRange{}
@@ -44,10 +64,12 @@ constexpr varre::engine::PassResourceId kMeshIndexResourceId = 101U;
   return clear_value;
 }
 
-void center_model_in_place(varre::assets::ModelAsset *model) {
+void fit_model_to_view_in_place(varre::assets::ModelAsset *model, float width, float height) {
   if (model == nullptr || model->vertices.empty()) {
-    throw std::invalid_argument("center_model_in_place requires a non-empty model.");
+    throw std::invalid_argument("fit_model_to_view_in_place requires a non-empty model.");
   }
+
+  const float aspect_ratio = width / height;
 
   float min_x = std::numeric_limits<float>::max();
   float min_y = std::numeric_limits<float>::max();
@@ -68,10 +90,26 @@ void center_model_in_place(varre::assets::ModelAsset *model) {
   const float center_x = (min_x + max_x) * 0.5F;
   const float center_y = (min_y + max_y) * 0.5F;
   const float center_z = (min_z + max_z) * 0.5F;
+
+  const float extent_x = max_x - min_x;
+  const float extent_y = max_y - min_y;
+  const float extent_z = max_z - min_z;
+  const float max_extent = std::max({extent_x, extent_y, extent_z});
+
+  // Scale the largest dimension to fit comfortably within the NDC range [-1, 1].
+  // Using 0.8 to leave some margin and fit Z into [0, 1].
+  const float scale = (max_extent > 0.0F) ? (0.8F / max_extent) : 1.0F;
+
   for (varre::assets::Vertex &vertex : model->vertices) {
-    vertex.px -= center_x;
-    vertex.py -= center_y;
-    vertex.pz -= center_z;
+    vertex.px = (vertex.px - center_x) * scale / aspect_ratio;
+    vertex.py = -(vertex.py - center_y) * scale;
+    vertex.pz = (vertex.pz - center_z) * scale + 0.5F;
+
+    vertex.cx = 1.0F;
+    vertex.cy = 0.0F;
+    vertex.cz = 0.0F;
+
+    vertex.ny = -vertex.ny;
   }
 }
 
@@ -93,7 +131,7 @@ void record_mesh_draw(varre::engine::PassCommandEncoder &encoder, const vk::Exte
 
   const vk::VertexInputBindingDescription2EXT binding_description =
     vk::VertexInputBindingDescription2EXT{}.setBinding(0U).setStride(sizeof(varre::assets::Vertex)).setInputRate(vk::VertexInputRate::eVertex).setDivisor(1U);
-  const std::array<vk::VertexInputAttributeDescription2EXT, 2> attribute_descriptions{
+  const std::array<vk::VertexInputAttributeDescription2EXT, 3> attribute_descriptions{
     vk::VertexInputAttributeDescription2EXT{}
       .setLocation(0U)
       .setBinding(0U)
@@ -104,20 +142,25 @@ void record_mesh_draw(varre::engine::PassCommandEncoder &encoder, const vk::Exte
       .setBinding(0U)
       .setFormat(vk::Format::eR32G32B32Sfloat)
       .setOffset(static_cast<std::uint32_t>(offsetof(varre::assets::Vertex, cx))),
+    vk::VertexInputAttributeDescription2EXT{}
+      .setLocation(2U)
+      .setBinding(0U)
+      .setFormat(vk::Format::eR32G32B32Sfloat)
+      .setOffset(static_cast<std::uint32_t>(offsetof(varre::assets::Vertex, nx))),
   };
   encoder.set_vertex_input(std::span<const vk::VertexInputBindingDescription2EXT>{&binding_description, 1U}, attribute_descriptions);
 
   encoder.set_primitive_topology(vk::PrimitiveTopology::eTriangleList);
   encoder.set_polygon_mode(vk::PolygonMode::eFill);
   encoder.set_rasterizer_discard_enable(false);
-  encoder.set_cull_mode(vk::CullModeFlagBits::eNone);
-  encoder.set_front_face(vk::FrontFace::eCounterClockwise);
+  encoder.set_cull_mode(vk::CullModeFlagBits::eBack);
+  encoder.set_front_face(vk::FrontFace::eClockwise);
   encoder.set_primitive_restart_enable(false);
   encoder.set_line_width(1.0F);
 
-  encoder.set_depth_test_enable(false);
-  encoder.set_depth_write_enable(false);
-  encoder.set_depth_compare_op(vk::CompareOp::eAlways);
+  encoder.set_depth_test_enable(true);
+  encoder.set_depth_write_enable(true);
+  encoder.set_depth_compare_op(vk::CompareOp::eLessOrEqual);
   encoder.set_depth_bounds_test_enable(false);
   encoder.set_depth_bias_enable(false);
   encoder.set_stencil_test_enable(false);
@@ -159,7 +202,8 @@ void record_mesh_draw(varre::engine::PassCommandEncoder &encoder, const vk::Exte
 }
 
 void build_mesh_frame_graph(const varre::engine::PassFrameContext &frame_context, varre::engine::PassGraph *graph,
-                            const std::span<const varre::engine::PassShaderBinding> shader_bindings, const varre::engine::GpuMesh &mesh) {
+                            const std::span<const varre::engine::PassShaderBinding> shader_bindings, const varre::engine::GpuMesh &mesh,
+                            const GpuDepthBuffer &depth_buffer) {
   if (graph == nullptr) {
     throw std::invalid_argument("build_mesh_frame_graph requires a valid graph pointer.");
   }
@@ -188,6 +232,9 @@ void build_mesh_frame_graph(const varre::engine::PassFrameContext &frame_context
   }
 
   const vk::ImageSubresourceRange subresource_range = swapchain_color_subresource_range();
+  const vk::ImageSubresourceRange depth_subresource_range =
+    vk::ImageSubresourceRange{}.setAspectMask(vk::ImageAspectFlagBits::eDepth).setBaseMipLevel(0U).setLevelCount(1U).setBaseArrayLayer(0U).setLayerCount(1U);
+
   static_cast<void>(graph->add_phase(
     varre::engine::PassPhaseDesc{
       .name = "mesh_simple_pass",
@@ -213,7 +260,16 @@ void build_mesh_frame_graph(const varre::engine::PassFrameContext &frame_context
                 .clear_value = dark_clear_color(),
               },
             },
-          .depth_attachment = std::nullopt,
+          .depth_attachment =
+            varre::engine::PassDepthAttachmentDesc{
+              .resource_id = kMeshDepthResourceId,
+              .image = depth_buffer.image.image(),
+              .subresource_range = depth_subresource_range,
+              .image_view = *depth_buffer.view,
+              .load_op = vk::AttachmentLoadOp::eClear,
+              .store_op = vk::AttachmentStoreOp::eDontCare,
+              .clear_value = vk::ClearValue{vk::ClearDepthStencilValue{1.0F, 0U}},
+            },
           .stencil_attachment = std::nullopt,
         },
     },
@@ -237,19 +293,22 @@ int main() {
     varre::app::AppCore app = varre::app::AppCore::create(create_info);
     varre::engine::ShaderObjectCache shader_cache = varre::engine::ShaderObjectCache::create(app.engine());
     varre::engine::ModelUploadService model_upload = varre::engine::ModelUploadService::create(app.engine());
+    varre::engine::TextureUploadService texture_service = varre::engine::TextureUploadService::create(app.engine());
 
-    constexpr varre::assets::ModelId mesh_id = varre::assets::ModelId::CUBE;
+    varre::assets::ModelId mesh_id = varre::assets::ModelId::UTAH_TEAPOT;
     varre::assets::ModelAsset model = varre::assets::load_model(mesh_id);
-    center_model_in_place(&model);
+    fit_model_to_view_in_place(&model, static_cast<float>(create_info.window.width), static_cast<float>(create_info.window.height));
     const varre::engine::GpuMesh &mesh = model_upload.upload_and_cache(model);
+
+    GpuDepthBuffer depth_buffer = GpuDepthBuffer::create(app.engine(), texture_service, app.swapchain().extent().width, app.swapchain().extent().height);
 
     const std::array<varre::engine::ShaderObjectCreateEntryById, 2> mesh_shader_entries{
       varre::engine::ShaderObjectCreateEntryById{
-        .shader_id = varre::assets::ShaderId::EXAMPLE_VERTEX_VERTEXMAIN,
+        .shader_id = varre::assets::ShaderId::MESH_SIMPLE_VERTEX_VERTEXMAIN,
         .next_stage = vk::ShaderStageFlagBits::eFragment,
       },
       varre::engine::ShaderObjectCreateEntryById{
-        .shader_id = varre::assets::ShaderId::EXAMPLE_FRAGMENT_FRAGMENTMAIN,
+        .shader_id = varre::assets::ShaderId::MESH_SIMPLE_FRAGMENT_FRAGMENTMAIN,
         .next_stage = {},
       },
     };
@@ -279,6 +338,7 @@ int main() {
       if (recreate_requested) {
         try {
           static_cast<void>(app.pass_frame_loop().frame_loop().try_recreate_swapchain(&app.swapchain(), app.swapchain_recreate_info_from_window()));
+          depth_buffer = GpuDepthBuffer::create(app.engine(), texture_service, app.swapchain().extent().width, app.swapchain().extent().height);
         } catch (const varre::engine::EngineError &error) {
           std::cerr << "Swapchain recreate failed: " << error.what() << '\n';
         }
@@ -289,8 +349,8 @@ int main() {
 
       const varre::engine::PassFrameRunResult result = app.pass_frame_loop().run_frame(
         &app.swapchain(),
-        [&mesh_shader_bindings, &mesh](const varre::engine::PassFrameContext &context, varre::engine::PassGraph *graph) {
-          build_mesh_frame_graph(context, graph, std::span<const varre::engine::PassShaderBinding>{mesh_shader_bindings}, mesh);
+        [&mesh_shader_bindings, &mesh, &depth_buffer](const varre::engine::PassFrameContext &context, varre::engine::PassGraph *graph) {
+          build_mesh_frame_graph(context, graph, std::span<const varre::engine::PassShaderBinding>{mesh_shader_bindings}, mesh, depth_buffer);
         },
         run_info);
 

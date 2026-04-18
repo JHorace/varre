@@ -215,6 +215,41 @@ public:
    */
   [[nodiscard]] std::size_t size() const noexcept;
 
+  /**
+   * @brief Create one device-local image using VMA.
+   * @param width Texture width in texels.
+   * @param height Texture height in texels.
+   * @param format Texture format.
+   * @param additional_usage Additional usage flags.
+   * @return Allocated GPU image.
+   */
+  [[nodiscard]] GpuImage create_device_local_image(std::uint32_t width, std::uint32_t height, vk::Format format,
+                                                   vk::ImageUsageFlags additional_usage = {}) const;
+
+  /**
+   * @brief Build a sampled image view for a texture image.
+   * @param image Texture image handle.
+   * @param format Texture format.
+   * @param aspect_mask Image aspect mask (default is eColor).
+   * @return Texture image view.
+   */
+  [[nodiscard]] vk::raii::ImageView create_image_view(vk::Image image, vk::Format format,
+                                                      vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor) const;
+
+  /**
+   * @brief Build a sampler for a texture upload request.
+   * @param request Texture upload request.
+   * @return Texture sampler.
+   */
+  [[nodiscard]] vk::raii::Sampler create_sampler(const TextureUploadRequest &request) const;
+
+  /**
+   * @brief Find cached texture index by path.
+   * @param path Cache lookup path.
+   * @return Cached index when present; `cached_paths_.size()` otherwise.
+   */
+  [[nodiscard]] std::size_t find_cached_index(std::string_view path) const noexcept;
+
 private:
   /**
    * @brief Internal constructor from prebuilt resources.
@@ -239,44 +274,11 @@ private:
   [[nodiscard]] std::vector<std::byte> decode_file_rgba8(std::string_view path, std::uint32_t *out_width, std::uint32_t *out_height) const;
 
   /**
-   * @brief Create one device-local image using VMA.
-   * @param width Texture width in texels.
-   * @param height Texture height in texels.
-   * @param format Texture format.
-   * @param additional_usage Additional usage flags.
-   * @return Allocated GPU image.
-   */
-  [[nodiscard]] GpuImage create_device_local_image(std::uint32_t width, std::uint32_t height, vk::Format format,
-                                                   vk::ImageUsageFlags additional_usage) const;
-
-  /**
    * @brief Upload one staging payload into a texture image and transition to shader-read layout.
    * @param image Destination GPU image.
    * @param payload Staging byte payload.
    */
   void upload_image_payload(const GpuImage &image, std::span<const std::byte> payload);
-
-  /**
-   * @brief Build a sampled image view for a texture image.
-   * @param image Texture image handle.
-   * @param format Texture format.
-   * @return Texture image view.
-   */
-  [[nodiscard]] vk::raii::ImageView create_image_view(vk::Image image, vk::Format format) const;
-
-  /**
-   * @brief Build a sampler for a texture upload request.
-   * @param request Texture upload request.
-   * @return Texture sampler.
-   */
-  [[nodiscard]] vk::raii::Sampler create_sampler(const TextureUploadRequest &request) const;
-
-  /**
-   * @brief Find cached texture index by path.
-   * @param path Cache lookup path.
-   * @return Cached index when present; `cached_paths_.size()` otherwise.
-   */
-  [[nodiscard]] std::size_t find_cached_index(std::string_view path) const noexcept;
 
   const EngineContext *engine_ = nullptr;
   const vk::raii::Device *device_ = nullptr;

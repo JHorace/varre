@@ -19,6 +19,7 @@
 #include <vk_mem_alloc.h>
 
 namespace varre::engine {
+namespace {
 namespace detail {
 /**
  * @brief Convert Vulkan Memory Allocator result into structured engine errors.
@@ -45,6 +46,7 @@ void throw_on_vma_error(const VkResult result, const std::string_view context) {
   return static_cast<std::uint32_t>(value);
 }
 } // namespace detail
+} // namespace
 
 GpuBuffer::GpuBuffer(const VmaAllocator allocator, const VkBuffer buffer, const VmaAllocation allocation, const vk::DeviceSize size_bytes) noexcept
     : allocator_(allocator), buffer_(buffer), allocation_(allocation), size_bytes_(size_bytes) {}

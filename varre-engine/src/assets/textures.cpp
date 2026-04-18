@@ -25,6 +25,7 @@
 #include <vk_mem_alloc.h>
 
 namespace varre::engine {
+namespace {
 namespace detail {
 /**
  * @brief Throw structured engine errors on Vulkan Memory Allocator failure.
@@ -123,6 +124,7 @@ struct StagingBuffer {
   StagingBuffer &operator=(StagingBuffer &&) = delete;
 };
 } // namespace detail
+} // namespace
 
 GpuImage::GpuImage(const VmaAllocator allocator, const VkImage image, const VmaAllocation allocation, const vk::Extent3D extent) noexcept
     : allocator_(allocator), image_(image), allocation_(allocation), extent_(extent) {}
@@ -551,7 +553,8 @@ void TextureUploadService::upload_image_payload(const GpuImage &image, const std
   }
 }
 
-vk::raii::ImageView TextureUploadService::create_image_view(const vk::Image image, const vk::Format format) const {
+vk::raii::ImageView TextureUploadService::create_image_view(const vk::Image image, const vk::Format format,
+                                                           const vk::ImageAspectFlags aspect_mask) const {
   if (device_ == nullptr) {
     throw make_engine_error(EngineErrorCode::kInvalidState, "TextureUploadService device is not initialized.");
   }
@@ -560,7 +563,7 @@ vk::raii::ImageView TextureUploadService::create_image_view(const vk::Image imag
                                                 .setViewType(vk::ImageViewType::e2D)
                                                 .setFormat(format)
                                                 .setSubresourceRange(vk::ImageSubresourceRange{}
-                                                                       .setAspectMask(vk::ImageAspectFlagBits::eColor)
+                                                                       .setAspectMask(aspect_mask)
                                                                        .setBaseMipLevel(0U)
                                                                        .setLevelCount(1U)
                                                                        .setBaseArrayLayer(0U)
