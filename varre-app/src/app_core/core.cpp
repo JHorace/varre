@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
@@ -38,9 +40,14 @@ void append_unique_string(TStringContainer *container, const std::string &value)
 AppCore::SdlVideoSubsystemGuard::SdlVideoSubsystemGuard(const bool initialized) noexcept : initialized_(initialized) {}
 
 AppCore::SdlVideoSubsystemGuard AppCore::SdlVideoSubsystemGuard::create() {
+  if (!SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11,wayland")) {
+    // Non-fatal; SDL will use its internal default if hint cannot be set.
+  }
+
   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
     throw sdl_error("SDL_InitSubSystem(SDL_INIT_VIDEO) failed");
   }
+
   return SdlVideoSubsystemGuard{true};
 }
 
@@ -240,6 +247,7 @@ AppEventSignals AppCore::classify_event(const SDL_Event &event) const {
   AppEventSignals signals{};
 
   if (event.type == static_cast<std::uint32_t>(SDL_EVENT_QUIT)) {
+    spdlog::info("AppCore: Received SDL_EVENT_QUIT");
     signals.close_requested = true;
     return signals;
   }
@@ -249,7 +257,7 @@ AppEventSignals AppCore::classify_event(const SDL_Event &event) const {
 
   switch (event.type) {
   case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-  case SDL_EVENT_WINDOW_DESTROYED:
+    spdlog::info("AppCore: Received SDL_EVENT_WINDOW_CLOSE_REQUESTED for window {}", window_id_);
     signals.close_requested = true;
     break;
   default:
@@ -277,6 +285,19 @@ engine::SwapchainCreateInfo AppCore::swapchain_recreate_info_from_window() const
   engine::SwapchainCreateInfo recreate_info = swapchain_create_info_;
   update_swapchain_extent_from_window(window_.get(), sync_swapchain_extent_with_window_, &recreate_info);
   return recreate_info;
+}
+
+AppCore::~AppCore() {
+  spdlog::info("AppCore: Shutting down...");
+  try {
+    wait_idle();
+    spdlog::info("AppCore: GPU idle confirmed.");
+  } catch (const std::exception &e) {
+    spdlog::error("AppCore: GPU idle failed: {}", e.what());
+    // Non-fatal; we cannot throw from a destructor and we tried our best to wait for GPU.
+  } catch (...) {
+    spdlog::error("AppCore: GPU idle failed with unknown exception");
+  }
 }
 
 void AppCore::wait_idle() const { pass_frame_loop_.wait_idle(); }

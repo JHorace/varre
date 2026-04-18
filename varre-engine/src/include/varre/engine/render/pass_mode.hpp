@@ -656,6 +656,8 @@ struct PassExecutionInfo {
   std::vector<PassExternalWait> waits;
   /** @brief Additional signals merged into submit for selected phases. */
   std::vector<PassExternalSignal> signals;
+  /** @brief Optional fence signaled after all phase submits complete on the device. */
+  vk::Fence signal_fence = VK_NULL_HANDLE;
 };
 
 /**

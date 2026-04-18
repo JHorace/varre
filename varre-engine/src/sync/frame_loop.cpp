@@ -45,7 +45,7 @@ void append_unique_semaphore(std::vector<vk::Semaphore> *semaphores, const vk::S
     static_cast<void>(index);
     FrameSyncPrimitives frame{};
     frame.image_available = vk::raii::Semaphore(device, semaphore_create_info);
-    frame.render_finished = vk::raii::Semaphore(device, semaphore_create_info);
+    frame.render_finished = VK_NULL_HANDLE;
     frame.in_flight = vk::raii::Fence(device, fence_create_info);
     frames.push_back(std::move(frame));
   }
@@ -78,9 +78,9 @@ void append_unique_semaphore(std::vector<vk::Semaphore> *semaphores, const vk::S
 } // namespace detail
 
 FrameLoop::FrameLoop(const vk::raii::Device *device, const vk::Queue graphics_queue, const vk::Queue present_queue, std::vector<FrameSyncPrimitives> &&frames,
-                     std::vector<vk::Fence> &&image_in_flight_fences)
+                     std::vector<vk::Fence> &&image_in_flight_fences, std::vector<vk::raii::Semaphore> &&image_render_finished_semaphores)
     : device_(device), graphics_queue_(graphics_queue), present_queue_(present_queue), frames_(std::move(frames)),
-      image_in_flight_fences_(std::move(image_in_flight_fences)) {
+      image_in_flight_fences_(std::move(image_in_flight_fences)), image_render_finished_semaphores_(std::move(image_render_finished_semaphores)) {
   deferred_releases_.resize(frames_.size());
 }
 
@@ -91,9 +91,17 @@ FrameLoop FrameLoop::create(const EngineContext &engine, const SwapchainContext 
 
   std::vector<FrameSyncPrimitives> frames = detail::create_frame_sync_primitives(device, frame_count);
 
+  const vk::SemaphoreCreateInfo semaphore_create_info{};
+  std::vector<vk::raii::Semaphore> image_render_finished_semaphores;
+  image_render_finished_semaphores.reserve(swapchain.image_count());
+  for (std::uint32_t i = 0; i < swapchain.image_count(); ++i) {
+    image_render_finished_semaphores.emplace_back(device, semaphore_create_info);
+  }
+
   std::vector<vk::Fence> image_in_flight_fences(swapchain.image_count(), VK_NULL_HANDLE);
   return FrameLoop{
     &device, queue_topology.graphics_queue, queue_topology.present_queue, std::move(frames), std::move(image_in_flight_fences),
+    std::move(image_render_finished_semaphores),
   };
 }
 
@@ -167,6 +175,9 @@ AcquiredFrame FrameLoop::acquire_next_image(const SwapchainContext &swapchain, c
   image_in_flight_fences_[result.image_index] = *frame.in_flight;
 
   device_->resetFences(in_flight_fence);
+  last_acquired_image_index_ = result.image_index;
+  frame.render_finished = *image_render_finished_semaphores_[result.image_index];
+
   frame_acquired_ = true;
   return result;
 }
@@ -196,7 +207,7 @@ void FrameLoop::submit_graphics_batch(const GraphicsSubmitBatch &batch) {
 
   std::vector<vk::Semaphore> signal_semaphores = batch.signals;
   if (batch.signal_render_finished) {
-    detail::append_unique_semaphore(&signal_semaphores, *frame.render_finished);
+    detail::append_unique_semaphore(&signal_semaphores, frame.render_finished);
   }
 
   const vk::SubmitInfo submit_info = vk::SubmitInfo{}
@@ -248,7 +259,7 @@ PresentedFrame FrameLoop::present(const SwapchainContext &swapchain, const Frame
     if (!render_finished_signaled_) {
       throw make_engine_error(EngineErrorCode::kInvalidState, "present requested render-finished wait, but submit did not signal it for this frame.");
     }
-    detail::append_unique_semaphore(&present_waits, *frame.render_finished);
+    detail::append_unique_semaphore(&present_waits, frame.render_finished);
   }
   const vk::PresentInfoKHR present_info =
     vk::PresentInfoKHR{}.setWaitSemaphores(present_waits).setSwapchains(swapchain_handle).setImageIndices(request.image_index);
@@ -383,6 +394,14 @@ void FrameLoop::notify_swapchain_recreated(const SwapchainContext &swapchain) {
   graphics_queue_ = swapchain.swapchain_queue_topology().graphics_queue;
   present_queue_ = swapchain.swapchain_queue_topology().present_queue;
   image_in_flight_fences_.assign(swapchain.image_count(), VK_NULL_HANDLE);
+
+  image_render_finished_semaphores_.clear();
+  image_render_finished_semaphores_.reserve(swapchain.image_count());
+  const vk::SemaphoreCreateInfo semaphore_create_info{};
+  for (std::uint32_t i = 0; i < swapchain.image_count(); ++i) {
+    image_render_finished_semaphores_.emplace_back(*device_, semaphore_create_info);
+  }
+
   frame_acquired_ = false;
   frame_submitted_ = false;
   render_finished_signaled_ = false;

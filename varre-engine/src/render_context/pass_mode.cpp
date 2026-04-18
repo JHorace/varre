@@ -1577,7 +1577,9 @@ void PassExecutor::execute(const PassGraph &graph, const PassExecutionInfo &exec
     const vk::CommandBufferSubmitInfo command_buffer_submit_info = vk::CommandBufferSubmitInfo{}.setCommandBuffer(command_buffer_handles[phase_index]);
     const vk::SubmitInfo2 submit_info =
       vk::SubmitInfo2{}.setWaitSemaphoreInfos(wait_infos).setCommandBufferInfos(command_buffer_submit_info).setSignalSemaphoreInfos(signal_infos);
-    queue_runtime.queue.submit2(submit_info, vk::Fence{});
+
+    const bool is_last_phase = (phase_index == resolved_phases.size() - 1U);
+    queue_runtime.queue.submit2(submit_info, is_last_phase ? execution_info.signal_fence : vk::Fence{});
   }
 
   // Wait for the final timeline point so execute() returns only after all phase work completes.

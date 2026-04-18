@@ -196,10 +196,11 @@ PassFrameRunResult PassFrameLoop::run_frame(SwapchainContext *swapchain, const P
         {
           PassExternalSignal{
             .phase_id = static_cast<PassPhaseId>(graph.size() - 1U),
-            .semaphore = *sync.render_finished,
+            .semaphore = sync.render_finished,
             .stage_mask = run_info.render_finished_signal_stage_mask,
           },
         },
+      .signal_fence = *sync.in_flight,
     };
     pass_executor_.execute(graph, execution_info);
     frame_loop_.notify_external_submit(true);

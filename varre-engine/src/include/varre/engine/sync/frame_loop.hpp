@@ -26,8 +26,11 @@ struct SwapchainCreateInfo;
 struct FrameSyncPrimitives {
   /** @brief Signaled by image acquisition and waited in graphics submit. */
   vk::raii::Semaphore image_available{nullptr};
-  /** @brief Signaled by graphics submit and waited in present. */
-  vk::raii::Semaphore render_finished{nullptr};
+  /** @brief Signaled by graphics submit and waited in present.
+   *
+   * @note This is a handle to a per-image semaphore managed by @ref FrameLoop.
+   */
+  vk::Semaphore render_finished{VK_NULL_HANDLE};
   /** @brief Signals completion of GPU work submitted for this frame slot. */
   vk::raii::Fence in_flight{nullptr};
 };
@@ -327,14 +330,16 @@ private:
    * @brief Internal constructor from pre-built synchronization resources.
    */
   FrameLoop(const vk::raii::Device *device, vk::Queue graphics_queue, vk::Queue present_queue, std::vector<FrameSyncPrimitives> &&frames,
-            std::vector<vk::Fence> &&image_in_flight_fences);
+            std::vector<vk::Fence> &&image_in_flight_fences, std::vector<vk::raii::Semaphore> &&image_render_finished_semaphores);
 
   const vk::raii::Device *device_ = nullptr;
   vk::Queue graphics_queue_ = VK_NULL_HANDLE;
   vk::Queue present_queue_ = VK_NULL_HANDLE;
   std::vector<FrameSyncPrimitives> frames_;
   std::vector<vk::Fence> image_in_flight_fences_;
+  std::vector<vk::raii::Semaphore> image_render_finished_semaphores_;
   std::uint32_t current_frame_index_ = 0U;
+  std::uint32_t last_acquired_image_index_ = 0U;
   bool frame_acquired_ = false;
   bool frame_submitted_ = false;
   bool render_finished_signaled_ = false;

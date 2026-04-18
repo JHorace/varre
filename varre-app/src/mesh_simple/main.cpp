@@ -327,7 +327,6 @@ int main() {
         const varre::app::AppEventSignals signals = app.classify_event(event);
         if (signals.close_requested) {
           running = false;
-          break;
         }
         recreate_requested = recreate_requested || signals.swapchain_recreate_requested;
       }
@@ -359,6 +358,7 @@ int main() {
       }
     }
 
+    texture_service.wait_idle();
     model_upload.wait_idle();
     app.wait_idle();
     return 0;

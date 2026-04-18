@@ -104,6 +104,7 @@ public:
   AppCore &operator=(AppCore &&other) noexcept = delete;
   AppCore(const AppCore &) = delete;
   AppCore &operator=(const AppCore &) = delete;
+  ~AppCore();
 
   /**
    * @brief Access the owned SDL window.
