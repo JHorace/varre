@@ -13,3 +13,4 @@ target_include_directories(
 add_subdirectory(app_core)
 add_subdirectory(triangle)
 add_subdirectory(mesh_simple)
+add_subdirectory(simple_stress)
